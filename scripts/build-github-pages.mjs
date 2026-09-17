@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const outputRoot = resolve(projectRoot, 'docs');
-const staticVersion = '20260917-2';
+const staticVersion = '20260917-3';
 
 function replaceRequired(source, search, replacement, label) {
   if (!source.includes(search)) throw new Error(`Unable to build GitHub Pages: ${label} was not found.`);

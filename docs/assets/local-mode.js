@@ -12,10 +12,10 @@
   const HANDLE_BUDGET = 'budget';
   const PAGE_ROOT = new URL('./', location.href);
   const DOCUMENT_ROOT_CANDIDATES = [
-    [],
-    ['documents'],
-    ['Project Tools Library', 'documents'],
     ['Project Tools Content Library', 'Project Tools Library', 'documents'],
+    ['Project Tools Library', 'documents'],
+    ['documents'],
+    [],
   ];
   const BUDGET_ROOT_CANDIDATES = [
     [],
@@ -27,7 +27,8 @@
   let databasePromise;
   let libraryHandle = null;
   let budgetHandle = null;
-  const documentLayoutCache = new WeakMap();
+  let activeLibraryInventory = null;
+  const documentInventoryCache = new WeakMap();
   const budgetLayoutCache = new WeakMap();
   let settingsDialog = null;
   let settingsButton = null;
@@ -210,15 +211,6 @@
     }).filter(Boolean);
   }
 
-  function libraryRecords() {
-    try {
-      const records = JSON.parse(document.getElementById('library-data')?.textContent || '[]');
-      return Array.isArray(records) ? records : [];
-    } catch (_) {
-      return [];
-    }
-  }
-
   function budgetSourceFiles() {
     try {
       const catalog = JSON.parse(document.getElementById('budget-catalog')?.textContent || '{}');
@@ -228,31 +220,94 @@
     }
   }
 
-  function documentCandidate(layout, insideParts, filename) {
-    return [...layout.prefix, ...(layout.mode === 'tree' ? insideParts : [filename])];
+  async function directoryAt(root, parts) {
+    let directory = root;
+    for (const part of parts.filter(Boolean)) directory = await directory.getDirectoryHandle(part);
+    return directory;
+  }
+
+  function inventoryPathKey(value) {
+    return String(value || '')
+      .replace(/\\/g, '/')
+      .replace(/^\.?\/?documents\//i, '')
+      .replace(/^\/+|\/+$/g, '')
+      .normalize('NFKC')
+      .toLocaleLowerCase();
+  }
+
+  async function collectDirectoryFiles(directory, parentParts = [], output = [], depth = 0) {
+    if (depth > 8) return output;
+    for await (const [name, entry] of directory.entries()) {
+      if (output.length >= 20000) throw new Error('The selected folder contains too many files to use as a document library.');
+      const relativeParts = [...parentParts, name];
+      if (entry.kind === 'file') {
+        output.push({ name, relativePath: relativeParts.join('/'), handle: entry });
+      } else if (entry.kind === 'directory') {
+        await collectDirectoryFiles(entry, relativeParts, output, depth + 1);
+      }
+    }
+    return output;
+  }
+
+  async function locateDocumentInventory(root, force = false) {
+    if (!force && documentInventoryCache.has(root)) return documentInventoryCache.get(root);
+    for (const prefix of DOCUMENT_ROOT_CANDIDATES) {
+      try {
+        const directory = await directoryAt(root, prefix);
+        const files = await collectDirectoryFiles(directory);
+        if (!files.length) continue;
+        const byPath = new Map();
+        const byName = new Map();
+        for (const item of files) {
+          byPath.set(inventoryPathKey(item.relativePath), item);
+          const nameKey = String(item.name || '').normalize('NFKC').toLocaleLowerCase();
+          if (nameKey && !byName.has(nameKey)) byName.set(nameKey, item);
+        }
+        const inventory = { directory, prefix, files, byPath, byName };
+        documentInventoryCache.set(root, inventory);
+        return inventory;
+      } catch (error) {
+        if (error && /too many files/i.test(error.message || '')) throw error;
+      }
+    }
+    throw new Error('No files were found in the selected document library.');
+  }
+
+  function publishLibraryInventory(inventory) {
+    if (activeLibraryInventory === (inventory || null)) return;
+    activeLibraryInventory = inventory || null;
+    const api = window.ProjectToolsDocumentLibrary;
+    if (!api) return;
+    if (!inventory) {
+      api.clearInventory();
+      return;
+    }
+    api.setInventory(inventory.files.map(item => ({
+      name: item.name,
+      relativePath: item.relativePath,
+    })));
+  }
+
+  function hasDocument(relativePath, filename) {
+    if (!activeLibraryInventory) return false;
+    const parts = pathParts(relativePath);
+    const candidateName = filename || parts[parts.length - 1] || '';
+    return activeLibraryInventory.byPath.has(inventoryPathKey(relativePath)) ||
+      activeLibraryInventory.byName.has(String(candidateName).normalize('NFKC').toLocaleLowerCase());
+  }
+
+  function isLibraryReady() {
+    return Boolean(activeLibraryInventory && activeLibraryInventory.files.length);
   }
 
   async function findDocumentFile(root, relativePath) {
+    const inventory = await locateDocumentInventory(root);
     const parts = pathParts(relativePath);
-    const insideParts = String(parts[0] || '').toLocaleLowerCase() === 'documents' ? parts.slice(1) : parts;
-    const filename = insideParts[insideParts.length - 1];
-    if (!filename) throw new Error('The document path is empty.');
-    const remembered = documentLayoutCache.get(root);
-    if (remembered) {
-      try { return await fileAt(root, documentCandidate(remembered, insideParts, filename)); }
-      catch (_) { documentLayoutCache.delete(root); }
-    }
-    for (const prefix of DOCUMENT_ROOT_CANDIDATES) {
-      for (const mode of ['tree', 'flat']) {
-        const layout = { prefix, mode };
-        try {
-          const file = await fileAt(root, documentCandidate(layout, insideParts, filename));
-          documentLayoutCache.set(root, layout);
-          return file;
-        } catch (_) {}
-      }
-    }
-    throw new Error(`“${filename}” was not found in this folder.`);
+    const filename = parts[parts.length - 1];
+    const item = inventory.byPath.get(inventoryPathKey(relativePath)) ||
+      inventory.byName.get(String(filename || '').normalize('NFKC').toLocaleLowerCase());
+    if (!item) throw new Error(`“${filename || 'Document'}” was not found in this folder.`);
+    return item.handle.getFile();
   }
 
   async function findBudgetFile(root, filename) {
@@ -278,16 +333,14 @@
     return handle;
   }
 
-  async function validateLibraryHandle(handle, requestPermission = true) {
+  async function validateLibraryHandle(handle, requestPermission = true, force = false) {
     const root = await requirePermissionForValidation(handle, 'document library', requestPermission);
-    const sample = libraryRecords().find(record => record && record.path && record.fn);
-    if (!sample) throw new Error('The application document index is unavailable.');
     try {
-      await findDocumentFile(root, sample.path);
-    } catch (_) {
-      throw new Error('No matching Project Tools document library was found. Select the release folder, Project Tools Content Library, Project Tools Library, or its documents folder.');
+      return await locateDocumentInventory(root, force);
+    } catch (error) {
+      if (error && /too many files/i.test(error.message || '')) throw error;
+      throw new Error('No readable files were found. Select the release folder, Project Tools Content Library, Project Tools Library, or its documents folder.');
     }
-    return root;
   }
 
   async function validateBudgetHandle(handle, requestPermission = true) {
@@ -377,10 +430,13 @@
       id: kind === HANDLE_LIBRARY ? 'project-tools-library' : 'project-tools-price-lists',
       mode: 'read',
     });
-    if (kind === HANDLE_LIBRARY) await validateLibraryHandle(handle, true);
-    else await validateBudgetHandle(handle, true);
+    const inventory = kind === HANDLE_LIBRARY ? await validateLibraryHandle(handle, true, true) : null;
+    if (kind === HANDLE_BUDGET) await validateBudgetHandle(handle, true);
     await saveHandle(kind, handle);
-    if (kind === HANDLE_LIBRARY) libraryHandle = handle;
+    if (kind === HANDLE_LIBRARY) {
+      libraryHandle = handle;
+      publishLibraryInventory(inventory);
+    }
     else budgetHandle = handle;
     await refreshSettings();
     return handle;
@@ -392,7 +448,7 @@
     const state = await permission(handle, true);
     if (state !== 'granted') throw new Error('Folder access was not granted.');
     try {
-      if (kind === HANDLE_LIBRARY) await validateLibraryHandle(handle, false);
+      if (kind === HANDLE_LIBRARY) publishLibraryInventory(await validateLibraryHandle(handle, false, true));
       else await validateBudgetHandle(handle, false);
     } catch (_) {
       return chooseLocation(kind);
@@ -403,14 +459,17 @@
 
   async function clearLocation(kind) {
     await forgetHandle(kind);
-    if (kind === HANDLE_LIBRARY) libraryHandle = null;
+    if (kind === HANDLE_LIBRARY) {
+      libraryHandle = null;
+      publishLibraryInventory(null);
+    }
     else budgetHandle = null;
     await refreshSettings();
   }
 
-  function describeHandle(handle, state, fallback, validationError) {
+  function describeHandle(handle, state, fallback, validationError, connectedDetail) {
     if (!handle) return { text: fallback, state: 'missing', action: 'Select folder' };
-    if (state === 'granted' && !validationError) return { text: `${handle.name} · connected and verified`, state: 'connected', action: 'Connected' };
+    if (state === 'granted' && !validationError) return { text: `${handle.name} · ${connectedDetail || 'connected and verified'}`, state: 'connected', action: 'Connected' };
     if (state === 'granted') return { text: `${handle.name} · ${validationError}`, state: 'missing', action: 'Choose again' };
     return { text: `${handle.name} · remembered; reconnect required`, state: 'missing', action: 'Reconnect' };
   }
@@ -421,8 +480,9 @@
     const budgetState = await permission(budgetHandle, false);
     let libraryValidation = '';
     let budgetValidation = '';
+    let inventory = null;
     if (libraryState === 'granted') {
-      try { await validateLibraryHandle(libraryHandle, false); }
+      try { inventory = await validateLibraryHandle(libraryHandle, false); }
       catch (_) { libraryValidation = 'library files not found at this level'; }
     }
     if (budgetState === 'granted') {
@@ -431,7 +491,15 @@
     }
     const libraryReady = libraryState === 'granted' && !libraryValidation;
     const budgetReady = budgetState === 'granted' && !budgetValidation;
-    const library = describeHandle(libraryHandle, libraryState, 'No document library selected', libraryValidation);
+    if (libraryReady) publishLibraryInventory(inventory);
+    else publishLibraryInventory(null);
+    const library = describeHandle(
+      libraryHandle,
+      libraryState,
+      'No document library selected',
+      libraryValidation,
+      inventory ? `${inventory.files.length.toLocaleString()} file${inventory.files.length === 1 ? '' : 's'} available` : ''
+    );
     const budget = describeHandle(budgetHandle, budgetState, 'No price-list folder selected', budgetValidation);
     libraryStatus.textContent = library.text;
     libraryStatus.dataset.state = library.state;
@@ -590,6 +658,8 @@
     getLibraryFile,
     readBudgetWorkbook,
     exportBundle,
+    hasDocument,
+    isLibraryReady,
     openSettings,
     signOut,
   });

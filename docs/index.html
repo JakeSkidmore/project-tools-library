@@ -7,8 +7,8 @@
 <meta name="description" content="Browser-only document search, BOM, budgeting, Apple BOM, and DALI schedule workspace.">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="assets/local-mode.css?v=20260917-2">
-<script src="assets/local-mode.js?v=20260917-2"></script>
+<link rel="stylesheet" href="assets/local-mode.css?v=20260917-3">
+<script src="assets/local-mode.js?v=20260917-3"></script>
 <title>Project Tools</title>
 <script>
 try {
@@ -1556,9 +1556,9 @@ dialog::backdrop { background: rgba(3, 12, 18, .62); backdrop-filter: blur(3px);
       </div>
     </div>
     <div class="header-stats" aria-label="Library summary">
-      <div><strong>1,235</strong>documents</div>
-      <div class="optional-stat"><strong>47</strong>product types</div>
-      <div class="optional-stat"><strong>23</strong>product lines</div>
+      <div><strong id="library-document-count">1,235</strong>documents</div>
+      <div class="optional-stat"><strong id="library-product-type-count">47</strong>product types</div>
+      <div class="optional-stat"><strong id="library-product-line-count">23</strong>product lines</div>
     </div>
     <div class="header-actions">
       <button class="icon-button" id="help-button" type="button" aria-label="Advanced search help" title="Advanced search help">?</button>
@@ -1664,8 +1664,8 @@ dialog::backdrop { background: rgba(3, 12, 18, .62); backdrop-filter: blur(3px);
     <div class="result-list" id="result-list" aria-labelledby="results-heading"></div>
     <section class="empty-state" id="empty-state">
       <div class="empty-symbol" aria-hidden="true">⌕</div>
-      <h3>No documents matched</h3>
-      <p>Try fewer terms, clear a filter, search a part-number fragment, or use the suggested spelling.</p>
+      <h3 id="empty-state-title">No documents matched</h3>
+      <p id="empty-state-text">Try fewer terms, clear a filter, search a part-number fragment, or use the suggested spelling.</p>
       <button class="secondary-button suggestion-button hidden" id="suggestion-button" type="button"></button>
     </section>
     <nav class="pagination" id="pagination" aria-label="Result pages">
@@ -2038,7 +2038,6 @@ String.fromCodePoint||function(){var t=String.fromCharCode,e=Math.floor,n=functi
 (() => {
   'use strict';
 
-  const TOTAL_BYTES = 1956172083;
   const rawDocuments = JSON.parse(document.getElementById('library-data').textContent);
   const PIPE = ' | ';
   const STOP_WORDS = new Set(['a', 'an', 'and', 'for', 'from', 'in', 'of', 'on', 'or', 'the', 'to', 'with']);
@@ -2106,6 +2105,8 @@ String.fromCodePoint||function(){var t=String.fromCharCode,e=Math.floor,n=functi
     resultsSummary: document.getElementById('results-summary'),
     resultList: document.getElementById('result-list'),
     emptyState: document.getElementById('empty-state'),
+    emptyTitle: document.getElementById('empty-state-title'),
+    emptyText: document.getElementById('empty-state-text'),
     suggestion: document.getElementById('suggestion-button'),
     pagination: document.getElementById('pagination'),
     pageInfo: document.getElementById('page-info'),
@@ -2113,6 +2114,9 @@ String.fromCodePoint||function(){var t=String.fromCharCode,e=Math.floor,n=functi
     pageSize: document.getElementById('page-size'),
     smartNote: document.getElementById('smart-note'),
     smartNoteText: document.getElementById('smart-note-text'),
+    documentCount: document.getElementById('library-document-count'),
+    productTypeCount: document.getElementById('library-product-type-count'),
+    productLineCount: document.getElementById('library-product-line-count'),
     sidebar: document.getElementById('sidebar'),
     detailDialog: document.getElementById('detail-dialog'),
     detailName: document.getElementById('detail-name'),
@@ -2208,9 +2212,27 @@ String.fromCodePoint||function(){var t=String.fromCharCode,e=Math.floor,n=functi
     };
   }
 
-  const documents = rawDocuments.map(prepareDocument);
-  const typeCounts = countBy(documents, 'pt');
-  const vocabulary = buildVocabulary(documents);
+  function libraryPathKey(value) {
+    return String(value || '')
+      .replace(/\\/g, '/')
+      .replace(/^\.?\/?documents\//i, '')
+      .replace(/^\/+|\/+$/g, '')
+      .normalize('NFKC')
+      .toLocaleLowerCase();
+  }
+
+  const indexedByPath = new Map();
+  const indexedByName = new Map();
+  for (const record of rawDocuments) {
+    indexedByPath.set(libraryPathKey(record.path), record);
+    const nameKey = String(record.fn || '').normalize('NFKC').toLocaleLowerCase();
+    if (nameKey && !indexedByName.has(nameKey)) indexedByName.set(nameKey, record);
+  }
+
+  let documents = (window.PROJECT_TOOLS_STATIC_MODE ? [] : rawDocuments).map(prepareDocument);
+  let typeCounts = countBy(documents, 'pt');
+  let vocabulary = buildVocabulary(documents);
+  let libraryConnected = !window.PROJECT_TOOLS_STATIC_MODE;
 
   function countBy(items, field) {
     const counts = new Map();
@@ -2233,6 +2255,86 @@ String.fromCodePoint||function(){var t=String.fromCharCode,e=Math.floor,n=functi
     return [...frequency.entries()]
       .sort((a, b) => b[1] - a[1])
       .map(([token]) => token);
+  }
+
+  function recordForLocalFile(file, index) {
+    const relativePath = String(file.relativePath || file.name || '').replace(/\\/g, '/').replace(/^\/+/, '');
+    const filename = String(file.name || relativePath.split('/').pop() || 'Untitled file');
+    const matched = indexedByPath.get(libraryPathKey(relativePath)) || indexedByName.get(filename.normalize('NFKC').toLocaleLowerCase());
+    if (matched) {
+      return {
+        ...matched,
+        id: 1000000 + index,
+        fn: filename,
+        path: `documents/${relativePath}`,
+        bytes: Number(file.bytes || matched.bytes || 0)
+      };
+    }
+    const folders = relativePath.split('/').slice(0, -1);
+    const extension = (filename.match(/\.([^.]+)$/)?.[1] || 'file').toLocaleLowerCase();
+    const title = filename.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim() || filename;
+    const productType = folders[0] || 'Local files';
+    const productLine = folders[1] || 'Uncategorized';
+    const documentType = folders[2] || `${extension.toLocaleUpperCase()} file`;
+    return {
+      id: 1000000 + index,
+      pt: productType,
+      pl: productLine,
+      dt: documentType,
+      fn: filename,
+      path: `documents/${relativePath}`,
+      title,
+      subject: title,
+      sourceCount: 1,
+      products: '',
+      materials: '',
+      allTypes: productType,
+      allLines: productLine,
+      docUrls: '',
+      productUrls: '',
+      sha: `local:${libraryPathKey(relativePath)}`,
+      bytes: Number(file.bytes || 0),
+      ext: extension
+    };
+  }
+
+  function updateLibrarySummary() {
+    const productTypes = new Set(documents.map(document => document.pt).filter(Boolean));
+    const productLines = new Set(documents.map(document => document.pl).filter(Boolean));
+    const totalBytes = documents.reduce((sum, document) => sum + Number(document.bytes || 0), 0);
+    elements.documentCount.textContent = documents.length.toLocaleString();
+    elements.productTypeCount.textContent = productTypes.size.toLocaleString();
+    elements.productLineCount.textContent = productLines.size.toLocaleString();
+    elements.resultsSummary.title = libraryConnected
+      ? `${formatBytes(totalBytes)} across the selected local library`
+      : 'No local document library is connected';
+    if (!libraryConnected) {
+      elements.emptyTitle.textContent = 'Connect a document library';
+      elements.emptyText.textContent = 'Choose Local files, then select the folder containing your document library.';
+    } else if (!documents.length) {
+      elements.emptyTitle.textContent = 'No files found';
+      elements.emptyText.textContent = 'The selected document library does not contain any readable files.';
+    } else {
+      elements.emptyTitle.textContent = 'No documents matched';
+      elements.emptyText.textContent = 'Try fewer terms, clear a filter, search a part-number fragment, or use the suggested spelling.';
+    }
+  }
+
+  function setLocalInventory(files) {
+    libraryConnected = Array.isArray(files);
+    documents = (files || []).map(recordForLocalFile).map(prepareDocument);
+    typeCounts = countBy(documents, 'pt');
+    vocabulary = buildVocabulary(documents);
+    state.page = 1;
+    if (state.extension && !documents.some(document => document.ext === state.extension)) {
+      state.extension = '';
+      elements.formatFilter.value = '';
+    }
+    refreshCascadingFilters();
+    renderTypeList();
+    updateLibrarySummary();
+    renderResults();
+    return documents.length;
   }
 
   function variants(term) {
@@ -2835,8 +2937,13 @@ String.fromCodePoint||function(){var t=String.fromCharCode,e=Math.floor,n=functi
   restoreURLState();
   refreshCascadingFilters();
   renderTypeList();
+  updateLibrarySummary();
   renderResults();
-  elements.resultsSummary.title = `${formatBytes(TOTAL_BYTES)} in the complete library`;
+  window.ProjectToolsDocumentLibrary = Object.freeze({
+    setInventory: files => setLocalInventory(files),
+    clearInventory: () => setLocalInventory(null),
+    count: () => documents.length
+  });
 })();
 </script>
 <script>(() => {
@@ -4070,7 +4177,10 @@ String.fromCodePoint||function(){var t=String.fromCharCode,e=Math.floor,n=functi
     for (const row of rows) {
       if (!row.selectedSku) continue;
       const key = canonicalSku(row.selectedSku);
-      const matches = documentsBySku.get(key) || [];
+      const indexedMatches = documentsBySku.get(key) || [];
+      const matches = window.PROJECT_TOOLS_STATIC_MODE && window.ProjectToolsLocalFiles
+        ? indexedMatches.filter(record => window.ProjectToolsLocalFiles.hasDocument(record.path, record.fn))
+        : indexedMatches;
       if (!matches.length) {
         missingSkus.add(row.selectedSku);
         continue;
@@ -4145,7 +4255,9 @@ String.fromCodePoint||function(){var t=String.fromCharCode,e=Math.floor,n=functi
   function updateExportPreflight() {
     const validation = exportValidation();
     const includeDocs = elements.includeDocuments.checked;
-    const documentAccessReady = !includeDocs || location.protocol !== 'file:';
+    const documentAccessReady = !includeDocs || (window.PROJECT_TOOLS_STATIC_MODE && window.ProjectToolsLocalFiles
+      ? window.ProjectToolsLocalFiles.isLibraryReady()
+      : location.protocol !== 'file:');
     const allMatches = includeDocs ? matchDocumentsForRows(validation.populated) : null;
     const matches = allMatches ? filterDocumentMatches(allMatches) : null;
     const messages = [];
@@ -4172,7 +4284,9 @@ String.fromCodePoint||function(){var t=String.fromCharCode,e=Math.floor,n=functi
       if (!matches.documents.length) messages.push('<strong>Select at least one document type</strong> or turn off product documents.');
     }
     if (!documentAccessReady) {
-      messages.push('<strong>Open the hosted Project Tools site</strong> to include product documents without selecting the source library.');
+      messages.push(window.PROJECT_TOOLS_STATIC_MODE
+        ? '<strong>Connect the document library in Local files</strong> before including product documents.'
+        : '<strong>Open the hosted Project Tools site</strong> to include product documents without selecting the source library.');
     }
     elements.exportPreflight.innerHTML = messages.join(' ');
     const blocked = !validation.populated.length || validation.unresolved.length || validation.invalid.length ||
@@ -5050,7 +5164,7 @@ String.fromCodePoint||function(){var t=String.fromCharCode,e=Math.floor,n=functi
   });
 })();
 </script>
-<script type="module" src="assets/apple-dali.mjs?v=20260917-2"></script>
-<script type="module" src="assets/apple-bom.mjs?v=20260917-2"></script>
+<script type="module" src="assets/apple-dali.mjs?v=20260917-3"></script>
+<script type="module" src="assets/apple-bom.mjs?v=20260917-3"></script>
 </body>
 </html>
