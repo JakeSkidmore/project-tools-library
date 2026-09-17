@@ -7,8 +7,8 @@
 <meta name="description" content="Browser-only document search, BOM, budgeting, Apple BOM, and DALI schedule workspace.">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="assets/local-mode.css?v=20260917-3">
-<script src="assets/local-mode.js?v=20260917-3"></script>
+<link rel="stylesheet" href="assets/local-mode.css?v=20260917-4">
+<script src="assets/local-mode.js?v=20260917-4"></script>
 <title>Project Tools</title>
 <script>
 try {
@@ -4721,13 +4721,14 @@ String.fromCodePoint||function(){var t=String.fromCharCode,e=Math.floor,n=functi
     const includePricing = elements.includePricing.checked;
     const includeDocuments = elements.includeDocuments.checked;
     const applicationExportEndpoint = configuredApplicationEndpoint('/api/export');
+    const localBrowserExport = Boolean(window.PROJECT_TOOLS_STATIC_MODE && window.ProjectToolsLocalFiles);
     let rootHandle = null;
     let saveHandle = null;
     const fileName = 'Project_BOM_' + timestampLabel() + '.pdf';
     const packageName = 'Project_BOM_' + timestampLabel();
     try {
       elements.exportError.hidden = true;
-      if (!applicationExportEndpoint && includeDocuments) {
+      if (!localBrowserExport && !applicationExportEndpoint && includeDocuments) {
         if (typeof window.showDirectoryPicker !== 'function') {
           throw new Error('Product-document folders require current Chrome or Edge with directory access.');
         }
@@ -4739,7 +4740,7 @@ String.fromCodePoint||function(){var t=String.fromCharCode,e=Math.floor,n=functi
           mode: 'readwrite',
           startIn: 'downloads'
         });
-      } else if (!applicationExportEndpoint && typeof window.showSaveFilePicker === 'function') {
+      } else if (!localBrowserExport && !applicationExportEndpoint && typeof window.showSaveFilePicker === 'function') {
         saveHandle = await window.showSaveFilePicker({
           id: 'crestron-bom-pdf',
           suggestedName: fileName,
@@ -4753,7 +4754,26 @@ String.fromCodePoint||function(){var t=String.fromCharCode,e=Math.floor,n=functi
       elements.exportProgress.hidden = !includeDocuments;
       elements.exportProgressBar.style.width = '0%';
       const pdfBytes = await createBomPdf(includePricing, includeDocuments ? preflight.documentMatches : null);
-      if (applicationExportEndpoint) {
+      if (localBrowserExport) {
+        if (includeDocuments) {
+          const documents = preflight.documentMatches.documents.map(item => ({
+            path: item.record.path,
+            documentType: safeFilePart(item.record.dt, 'Other Documents'),
+            targetName: exportDocumentTarget(item.record)
+          }));
+          await window.ProjectToolsLocalFiles.exportBundle(
+            packageName,
+            [{ name: 'BOM.pdf', bytes: pdfBytes }],
+            documents
+          );
+          elements.exportDialog.close();
+          setStatus('Downloaded ' + packageName + '.zip with BOM.pdf and ' + documents.length + ' unique product documents.');
+        } else {
+          downloadBlob(new Blob([pdfBytes], { type: 'application/pdf' }), fileName);
+          elements.exportDialog.close();
+          setStatus('Downloaded ' + fileName + (includePricing ? ' with visible pricing.' : ' without pricing.'));
+        }
+      } else if (applicationExportEndpoint) {
         const result = await exportThroughApplication(
           applicationExportEndpoint,
           pdfBytes,
@@ -5164,7 +5184,7 @@ String.fromCodePoint||function(){var t=String.fromCharCode,e=Math.floor,n=functi
   });
 })();
 </script>
-<script type="module" src="assets/apple-dali.mjs?v=20260917-3"></script>
-<script type="module" src="assets/apple-bom.mjs?v=20260917-3"></script>
+<script type="module" src="assets/apple-dali.mjs?v=20260917-4"></script>
+<script type="module" src="assets/apple-bom.mjs?v=20260917-4"></script>
 </body>
 </html>

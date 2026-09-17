@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const outputRoot = resolve(projectRoot, 'docs');
-const staticVersion = '20260917-3';
+const staticVersion = '20260917-4';
 
 function replaceRequired(source, search, replacement, label) {
   if (!source.includes(search)) throw new Error(`Unable to build GitHub Pages: ${label} was not found.`);
@@ -46,6 +46,34 @@ html = replaceRequired(
   `  async function fetchLibraryDocument(relativePath) {\n    let response;\n    try {\n      response = await fetch(documentSourceUrl(relativePath), { cache: 'no-store' });\n    } catch (_) {\n      throw new Error('A product document could not be read from the application server.');\n    }\n    if (!response.ok) {\n      throw new Error('A product document could not be read (' + response.status + '). Refresh the site and try again.');\n    }\n    return response.blob();\n  }`,
   `  async function fetchLibraryDocument(relativePath) {\n    if (window.PROJECT_TOOLS_STATIC_MODE && window.ProjectToolsLocalFiles) {\n      return window.ProjectToolsLocalFiles.getLibraryFile(relativePath);\n    }\n    let response;\n    try {\n      response = await fetch(documentSourceUrl(relativePath), { cache: 'no-store' });\n    } catch (_) {\n      throw new Error('A product document could not be read from the application server.');\n    }\n    if (!response.ok) {\n      throw new Error('A product document could not be read (' + response.status + '). Refresh the site and try again.');\n    }\n    return response.blob();\n  }`,
   'document loader',
+);
+
+html = replaceRequired(
+  html,
+  `    const applicationExportEndpoint = configuredApplicationEndpoint('/api/export');\n    let rootHandle = null;`,
+  `    const applicationExportEndpoint = configuredApplicationEndpoint('/api/export');\n    const localBrowserExport = Boolean(window.PROJECT_TOOLS_STATIC_MODE && window.ProjectToolsLocalFiles);\n    let rootHandle = null;`,
+  'BOM browser-download mode',
+);
+
+html = replaceRequired(
+  html,
+  `      if (!applicationExportEndpoint && includeDocuments) {`,
+  `      if (!localBrowserExport && !applicationExportEndpoint && includeDocuments) {`,
+  'BOM folder-picker guard',
+);
+
+html = replaceRequired(
+  html,
+  `      } else if (!applicationExportEndpoint && typeof window.showSaveFilePicker === 'function') {`,
+  `      } else if (!localBrowserExport && !applicationExportEndpoint && typeof window.showSaveFilePicker === 'function') {`,
+  'BOM save-picker guard',
+);
+
+html = replaceRequired(
+  html,
+  `      if (applicationExportEndpoint) {\n        const result = await exportThroughApplication(`,
+  `      if (localBrowserExport) {\n        if (includeDocuments) {\n          const documents = preflight.documentMatches.documents.map(item => ({\n            path: item.record.path,\n            documentType: safeFilePart(item.record.dt, 'Other Documents'),\n            targetName: exportDocumentTarget(item.record)\n          }));\n          await window.ProjectToolsLocalFiles.exportBundle(\n            packageName,\n            [{ name: 'BOM.pdf', bytes: pdfBytes }],\n            documents\n          );\n          elements.exportDialog.close();\n          setStatus('Downloaded ' + packageName + '.zip with BOM.pdf and ' + documents.length + ' unique product documents.');\n        } else {\n          downloadBlob(new Blob([pdfBytes], { type: 'application/pdf' }), fileName);\n          elements.exportDialog.close();\n          setStatus('Downloaded ' + fileName + (includePricing ? ' with visible pricing.' : ' without pricing.'));\n        }\n      } else if (applicationExportEndpoint) {\n        const result = await exportThroughApplication(`,
+  'BOM local browser export',
 );
 
 html = replaceRequired(

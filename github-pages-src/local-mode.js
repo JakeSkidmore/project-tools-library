@@ -18,18 +18,19 @@
     [],
   ];
   const BUDGET_ROOT_CANDIDATES = [
-    [],
-    ['Source Price Lists'],
-    ['Budget Data', 'Source Price Lists'],
-    ['Project Tools Library', 'Budget Data', 'Source Price Lists'],
     ['Project Tools Content Library', 'Project Tools Library', 'Budget Data', 'Source Price Lists'],
+    ['Project Tools Library', 'Budget Data', 'Source Price Lists'],
+    ['Budget Data', 'Source Price Lists'],
+    ['Source Price Lists'],
+    [],
   ];
   let databasePromise;
   let libraryHandle = null;
   let budgetHandle = null;
   let activeLibraryInventory = null;
+  let activeBudgetInventory = null;
   const documentInventoryCache = new WeakMap();
-  const budgetLayoutCache = new WeakMap();
+  const budgetInventoryCache = new WeakMap();
   let settingsDialog = null;
   let settingsButton = null;
   let libraryStatus = null;
@@ -179,6 +180,15 @@
     return state;
   }
 
+  async function selectionPermission(selection, request) {
+    if (Array.isArray(selection)) {
+      if (!selection.length) return 'missing';
+      const states = await Promise.all(selection.map(handle => permission(handle, request)));
+      return states.every(state => state === 'granted') ? 'granted' : 'prompt';
+    }
+    return permission(selection, request);
+  }
+
   async function requirePermission(handle, label) {
     if (!handle) {
       openSettings();
@@ -211,13 +221,21 @@
     }).filter(Boolean);
   }
 
-  function budgetSourceFiles() {
+  function budgetSources() {
     try {
       const catalog = JSON.parse(document.getElementById('budget-catalog')?.textContent || '{}');
-      return [...new Set((catalog.priceLists || []).map(list => String(list.sourceFile || '').trim()).filter(Boolean))];
+      return (catalog.priceLists || []).map(list => ({
+        id: String(list.id || '').trim(),
+        label: String(list.label || '').trim(),
+        sourceFile: String(list.sourceFile || '').trim(),
+      })).filter(list => list.sourceFile);
     } catch (_) {
       return [];
     }
+  }
+
+  function budgetSourceFiles() {
+    return [...new Set(budgetSources().map(list => list.sourceFile))];
   }
 
   async function directoryAt(root, parts) {
@@ -310,20 +328,79 @@
     return item.handle.getFile();
   }
 
-  async function findBudgetFile(root, filename) {
-    const remembered = budgetLayoutCache.get(root);
-    if (remembered) {
-      try { return await fileAt(root, [...remembered, filename]); }
-      catch (_) { budgetLayoutCache.delete(root); }
+  function budgetFileKey(value) {
+    return String(value || '')
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/\.[^.]+$/, '')
+      .replace(/^\s*\d+[\s._-]*/, '')
+      .toLocaleLowerCase()
+      .replace(/[^a-z0-9]+/g, '');
+  }
+
+  function supportedBudgetFile(name) {
+    return /\.(xlsx|xlsm)$/i.test(String(name || ''));
+  }
+
+  function buildBudgetInventory(files, directory = null, prefix = []) {
+    const byExactName = new Map();
+    const byKey = new Map();
+    for (const item of files) {
+      const exactName = String(item.name || '').normalize('NFKC').toLocaleLowerCase();
+      if (exactName && !byExactName.has(exactName)) byExactName.set(exactName, item);
+      const key = budgetFileKey(item.name);
+      if (!key) continue;
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push(item);
+    }
+    return { directory, prefix, files, byExactName, byKey };
+  }
+
+  async function locateBudgetInventory(root, force = false) {
+    if (!force && budgetInventoryCache.has(root)) return budgetInventoryCache.get(root);
+    if (Array.isArray(root)) {
+      const files = [];
+      for (const handle of root) {
+        if (!handle || handle.kind !== 'file' || !supportedBudgetFile(handle.name)) continue;
+        files.push({ name: handle.name, relativePath: handle.name, handle });
+      }
+      if (!files.length) throw new Error('No .xlsx or .xlsm price-list workbooks were selected.');
+      const inventory = buildBudgetInventory(files);
+      budgetInventoryCache.set(root, inventory);
+      return inventory;
     }
     for (const prefix of BUDGET_ROOT_CANDIDATES) {
       try {
-        const file = await fileAt(root, [...prefix, filename]);
-        budgetLayoutCache.set(root, prefix);
-        return file;
-      } catch (_) {}
+        const directory = await directoryAt(root, prefix);
+        const files = (await collectDirectoryFiles(directory))
+          .filter(item => supportedBudgetFile(item.name));
+        if (!files.length) continue;
+        const inventory = buildBudgetInventory(files, directory, prefix);
+        budgetInventoryCache.set(root, inventory);
+        return inventory;
+      } catch (error) {
+        if (error && /too many files/i.test(error.message || '')) throw error;
+      }
     }
-    throw new Error(`“${filename}” was not found in this folder.`);
+    throw new Error('No .xlsx or .xlsm price-list workbooks were found in the selected folder or its subfolders.');
+  }
+
+  function selectBudgetInventoryItem(inventory, filename) {
+    const exactName = String(filename || '').normalize('NFKC').toLocaleLowerCase();
+    const exact = inventory.byExactName.get(exactName);
+    if (exact) return exact;
+    const matches = inventory.byKey.get(budgetFileKey(filename)) || [];
+    if (matches.length === 1) return matches[0];
+    if (inventory.files.length === 1) return inventory.files[0];
+    return null;
+  }
+
+  async function findBudgetFile(root, filename) {
+    const inventory = await locateBudgetInventory(root);
+    const item = selectBudgetInventoryItem(inventory, filename);
+    if (item) return item.handle.getFile();
+    const detected = inventory.files.slice(0, 5).map(file => `“${file.name}”`).join(', ');
+    throw new Error(`“${filename}” was not matched in the selected folder.${detected ? ` Detected: ${detected}.` : ''}`);
   }
 
   async function requirePermissionForValidation(handle, label, requestPermission) {
@@ -343,16 +420,20 @@
     }
   }
 
-  async function validateBudgetHandle(handle, requestPermission = true) {
-    const root = await requirePermissionForValidation(handle, 'price-list folder', requestPermission);
+  async function validateBudgetHandle(handle, requestPermission = true, force = false) {
+    if (!handle || (Array.isArray(handle) && !handle.length)) throw new Error('Choose the price-list workbooks.');
+    const permissionState = await selectionPermission(handle, requestPermission);
+    if (permissionState !== 'granted') throw new Error('Reconnect the remembered price-list workbooks.');
+    const root = handle;
     const filenames = budgetSourceFiles();
     if (!filenames.length) throw new Error('The application price-list index is unavailable.');
     try {
-      for (const filename of filenames) await findBudgetFile(root, filename);
-    } catch (_) {
-      throw new Error('The three expected price-list workbooks were not found. Select the release folder, Project Tools Library, Budget Data, or Source Price Lists.');
+      return await locateBudgetInventory(root, force);
+    } catch (error) {
+      if (error && /too many files/i.test(error.message || '')) throw error;
+      if (Array.isArray(root)) throw new Error('No .xlsx or .xlsm price-list workbooks were selected.');
+      throw new Error('No .xlsx or .xlsm workbooks were found. Select the folder that contains the price-list workbooks; the Windows folder picker intentionally shows folders only.');
     }
-    return root;
   }
 
   async function getLibraryFile(relativePath) {
@@ -374,14 +455,20 @@
       openSettings();
       throw new Error('Choose the price-list folder in Local files before generating a budget.');
     }
+    let firstFailure = null;
     for (const entry of roots) {
       try {
-        const root = await requirePermission(entry.handle, entry.label);
+        const permissionState = await selectionPermission(entry.handle, true);
+        if (permissionState !== 'granted') throw new Error(`Reconnect the remembered ${entry.label}.`);
+        const root = entry.handle;
         return await findBudgetFile(root, filename);
-      } catch (_) {}
+      } catch (error) {
+        if (!firstFailure) firstFailure = error;
+      }
     }
     openSettings();
-    throw new Error(`“${filename}” was not found. In Local files, choose the release folder, Project Tools Library, Budget Data, or Source Price Lists.`);
+    if (firstFailure && firstFailure.message) throw firstFailure;
+    throw new Error(`“${filename}” was not found. In Local files, choose the folder containing the .xlsx or .xlsm price-list workbooks.`);
   }
 
   function download(blob, filename) {
@@ -423,21 +510,39 @@
   }
 
   async function chooseLocation(kind) {
-    if (typeof window.showDirectoryPicker !== 'function') {
-      throw new Error('Remembered folders require desktop Chrome or Microsoft Edge.');
+    let handle;
+    if (kind === HANDLE_BUDGET && typeof window.showOpenFilePicker === 'function') {
+      handle = await window.showOpenFilePicker({
+        id: 'project-tools-price-lists',
+        multiple: true,
+        types: [{
+          description: 'Excel price-list workbooks',
+          accept: {
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+            'application/vnd.ms-excel.sheet.macroEnabled.12': ['.xlsm'],
+          },
+        }],
+      });
+    } else {
+      if (typeof window.showDirectoryPicker !== 'function') {
+        throw new Error('Remembered local files require desktop Chrome or Microsoft Edge.');
+      }
+      handle = await window.showDirectoryPicker({
+        id: kind === HANDLE_LIBRARY ? 'project-tools-library' : 'project-tools-price-lists',
+        mode: 'read',
+      });
     }
-    const handle = await window.showDirectoryPicker({
-      id: kind === HANDLE_LIBRARY ? 'project-tools-library' : 'project-tools-price-lists',
-      mode: 'read',
-    });
     const inventory = kind === HANDLE_LIBRARY ? await validateLibraryHandle(handle, true, true) : null;
-    if (kind === HANDLE_BUDGET) await validateBudgetHandle(handle, true);
+    const budgetInventory = kind === HANDLE_BUDGET ? await validateBudgetHandle(handle, true, true) : null;
     await saveHandle(kind, handle);
     if (kind === HANDLE_LIBRARY) {
       libraryHandle = handle;
       publishLibraryInventory(inventory);
     }
-    else budgetHandle = handle;
+    else {
+      budgetHandle = handle;
+      activeBudgetInventory = budgetInventory;
+    }
     await refreshSettings();
     return handle;
   }
@@ -445,11 +550,11 @@
   async function reconnect(kind) {
     const handle = kind === HANDLE_LIBRARY ? libraryHandle : budgetHandle;
     if (!handle) return chooseLocation(kind);
-    const state = await permission(handle, true);
+    const state = await selectionPermission(handle, true);
     if (state !== 'granted') throw new Error('Folder access was not granted.');
     try {
       if (kind === HANDLE_LIBRARY) publishLibraryInventory(await validateLibraryHandle(handle, false, true));
-      else await validateBudgetHandle(handle, false);
+      else activeBudgetInventory = await validateBudgetHandle(handle, false, true);
     } catch (_) {
       return chooseLocation(kind);
     }
@@ -463,36 +568,42 @@
       libraryHandle = null;
       publishLibraryInventory(null);
     }
-    else budgetHandle = null;
+    else {
+      budgetHandle = null;
+      activeBudgetInventory = null;
+    }
     await refreshSettings();
   }
 
-  function describeHandle(handle, state, fallback, validationError, connectedDetail) {
-    if (!handle) return { text: fallback, state: 'missing', action: 'Select folder' };
-    if (state === 'granted' && !validationError) return { text: `${handle.name} · ${connectedDetail || 'connected and verified'}`, state: 'connected', action: 'Connected' };
-    if (state === 'granted') return { text: `${handle.name} · ${validationError}`, state: 'missing', action: 'Choose again' };
-    return { text: `${handle.name} · remembered; reconnect required`, state: 'missing', action: 'Reconnect' };
+  function describeHandle(handle, state, fallback, validationError, connectedDetail, missingAction = 'Select folder') {
+    if (!handle) return { text: fallback, state: 'missing', action: missingAction };
+    const name = Array.isArray(handle) ? 'Selected price lists' : handle.name;
+    if (state === 'granted' && !validationError) return { text: `${name} · ${connectedDetail || 'connected and verified'}`, state: 'connected', action: 'Connected' };
+    if (state === 'granted') return { text: `${name} · ${validationError}`, state: 'missing', action: 'Choose again' };
+    return { text: `${name} · remembered; reconnect required`, state: 'missing', action: 'Reconnect' };
   }
 
   async function refreshSettings() {
     if (!settingsDialog) return { libraryReady: false, budgetReady: false };
     const libraryState = await permission(libraryHandle, false);
-    const budgetState = await permission(budgetHandle, false);
+    const budgetState = await selectionPermission(budgetHandle, false);
     let libraryValidation = '';
     let budgetValidation = '';
     let inventory = null;
+    let budgetInventory = null;
     if (libraryState === 'granted') {
       try { inventory = await validateLibraryHandle(libraryHandle, false); }
       catch (_) { libraryValidation = 'library files not found at this level'; }
     }
     if (budgetState === 'granted') {
-      try { await validateBudgetHandle(budgetHandle, false); }
+      try { budgetInventory = await validateBudgetHandle(budgetHandle, false); }
       catch (_) { budgetValidation = 'price-list workbooks not found at this level'; }
     }
     const libraryReady = libraryState === 'granted' && !libraryValidation;
     const budgetReady = budgetState === 'granted' && !budgetValidation;
     if (libraryReady) publishLibraryInventory(inventory);
     else publishLibraryInventory(null);
+    activeBudgetInventory = budgetReady ? budgetInventory : null;
     const library = describeHandle(
       libraryHandle,
       libraryState,
@@ -500,7 +611,14 @@
       libraryValidation,
       inventory ? `${inventory.files.length.toLocaleString()} file${inventory.files.length === 1 ? '' : 's'} available` : ''
     );
-    const budget = describeHandle(budgetHandle, budgetState, 'No price-list folder selected', budgetValidation);
+    const budget = describeHandle(
+      budgetHandle,
+      budgetState,
+      'No price-list workbooks selected',
+      budgetValidation,
+      budgetInventory ? `${budgetInventory.files.length.toLocaleString()} workbook${budgetInventory.files.length === 1 ? '' : 's'} available` : '',
+      'Select files'
+    );
     libraryStatus.textContent = library.text;
     libraryStatus.dataset.state = library.state;
     budgetStatus.textContent = budget.text;
@@ -549,7 +667,7 @@
           </div>
         </div>
         <div class="local-file-source">
-          <div class="local-file-copy"><strong>Budget price-list folder</strong><span id="local-budget-status"></span></div>
+          <div class="local-file-copy"><strong>Budget price-list workbooks</strong><span id="local-budget-status"></span></div>
           <div class="local-file-actions">
             <button class="local-secondary" id="local-budget-connect" type="button"></button>
             <button class="local-secondary" id="local-budget-change" type="button">Change…</button>
@@ -557,7 +675,7 @@
           </div>
         </div>
         <p class="local-error" id="local-files-error" role="alert" hidden></p>
-        <p class="local-note">If the browser clears site data, you use a different browser profile, or a folder is moved, choose it again. Current Chrome or Edge may occasionally ask you to reconnect a remembered folder.</p>
+        <p class="local-note">For pricing, select all three .xlsx or .xlsm workbooks in the file window (Ctrl+A is fine). The browser remembers them and reads current prices directly from those files. If the browser clears site data, you use a different browser profile, or a file is moved, choose it again.</p>
         <div class="local-files-footer">
           <button class="local-text-button" id="local-reset-account" type="button">Reset this browser’s login</button>
           <button class="local-primary" id="local-files-done" type="button">Done</button>

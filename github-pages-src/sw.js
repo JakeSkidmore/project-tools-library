@@ -1,4 +1,4 @@
-const CACHE_NAME = 'project-tools-pages-v3';
+const CACHE_NAME = 'project-tools-pages-v4';
 const APP_SHELL = [
   './',
   './index.html',
