@@ -56,3 +56,6 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+
+# GitHub Pages output is intentionally committed from /docs.
+!/docs/

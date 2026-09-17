@@ -1,0 +1,18 @@
+{
+  "name": "Project Tools Library",
+  "short_name": "Project Tools",
+  "description": "Local document search, BOM, budgeting, Apple BOM, and DALI schedule tools.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f3f6f8",
+  "theme_color": "#132b3a",
+  "icons": [
+    {
+      "src": "favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

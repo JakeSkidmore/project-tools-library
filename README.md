@@ -1,6 +1,6 @@
 # Project Tools Library
 
-Project Tools Library is the hosted interface for searching a locally managed product-document library and creating BOM, budget, Apple BOM, and Apple DALI schedule exports.
+Project Tools Library is a browser-based interface for searching a locally managed product-document library and creating BOM, budget, Apple BOM, and Apple DALI schedule exports.
 
 ## Privacy boundary
 
@@ -13,19 +13,17 @@ This public repository contains the web application only. It does **not** contai
 - saved projects or exported customer files; or
 - the private PC bridge service.
 
-The application authenticates through the private PC bridge. After authentication, protected requests are relayed to that bridge, which reads the current documents and pricing from the host PC. The bridge URL and token are server-side runtime settings and are never sent to the browser.
+The GitHub Pages edition reads files directly from folders that the user explicitly selects in desktop Chrome or Microsoft Edge. The browser remembers those folder handles in IndexedDB. Files are not uploaded to GitHub or to an application server.
 
-## Security model
+## GitHub Pages security model
 
-- Login is enforced by the private bridge, not by client-side JavaScript.
-- Browser sessions use secure, HTTP-only, same-site cookies.
-- Protected API routes require a valid user session.
-- Same-origin checks protect state-changing browser requests.
-- The bridge requires a separate long random service token.
-- Pricing and document responses are marked private and non-cacheable.
-- Login attempts are rate limited by the private bridge.
+- The lightweight username/password screen is stored in the user's browser and is not strong access control.
+- The public repository contains no price values, workbooks, documents, saved projects, or credentials.
+- The browser can read only folders the user explicitly selects and permits.
+- Remembered folder handles apply only to that browser profile and may require a one-click reconnect after a browser restart.
+- Pricing is read fresh from the selected local workbook whenever Generate Budget is used and remains in memory only for the current page session.
 
-Copying this repository does not provide access to the original PC, private bridge, documents, price lists, accounts, or sessions.
+Copying this repository does not provide access to any user's PC, selected folders, documents, price lists, local login, or saved work.
 
 ## Local development
 
@@ -33,9 +31,9 @@ Requirements:
 
 - Node.js 22.13 or newer
 - pnpm
-- access to a separately configured compatible PC bridge
+- desktop Chrome or Microsoft Edge for remembered local-folder access
 
-Copy `.env.example` to `.env.local`, replace the placeholder values, and then run:
+Run the Sites development version with:
 
 ```bash
 pnpm install
@@ -48,13 +46,19 @@ Create a production build with:
 pnpm build
 ```
 
-Never commit `.env.local` or any real bridge credentials.
+Build the static GitHub Pages edition with:
+
+```bash
+pnpm build:pages
+```
+
+The generated `/docs` directory is the GitHub Pages publishing source. Never commit workbooks, documents, exported projects, passwords, or environment secrets.
 
 ## Hosting
 
-The application uses server routes and therefore cannot run as a browser-only GitHub Pages site without architectural changes. Deploy it to a compatible server or worker environment and configure `CRESTRON_BACKEND_URL` and `CRESTRON_BACKEND_TOKEN` as protected runtime variables.
+GitHub Pages publishes the browser-only build from the `/docs` directory. It uses the File System Access API instead of protected server routes. Users select the document-library folder and price-list folder on first use; the same browser remembers those selections.
 
-The included `.openai/hosting.json` is intentionally unbound. The production Project Tools deployment and its project identifier are managed separately from this public source repository.
+The existing Sites source remains in the repository for compatibility, but GitHub Pages does not use its protected server routes. The production ChatGPT Site is managed separately and is not changed by the Pages build.
 
 ## License
 
