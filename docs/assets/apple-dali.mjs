@@ -475,6 +475,54 @@ export function joinSchedule(bluebeamRows, tables) {
   }).sort((left, right) => naturalCompare(left.loop, right.loop) || naturalCompare(left.zone, right.zone));
 }
 
+function normalizedLoop(value) {
+  return upper(value).replace(/\s+/g, '');
+}
+
+function normalizedZone(value) {
+  return upper(value).replace(/^Z(?:ONE)?\s*/i, '').replace(/\s+/g, '');
+}
+
+function sourceMatchIndex(tables) {
+  const exact = new Map();
+  for (const row of tables.filter(table => table.selected !== false).flatMap(mappedTableRows)) {
+    const key = `${normalizedLoop(row.loop)}|${normalizedZone(row.zone)}`;
+    if (!exact.has(key)) exact.set(key, []);
+    exact.get(key).push(row);
+  }
+  return exact;
+}
+
+function matchNote(notes) {
+  return clean(notes)
+    .replace(/(?:^|;\s*)\d+ LIGHTING CONTROL PROGRAMMING matches; verify selected information(?:;\s*|$)/gi, '; ')
+    .replace(/^;\s*|;\s*$/g, '');
+}
+
+function applyScheduleMatch(row, exact) {
+  row.loop = normalizedLoop(row.loop);
+  row.zone = normalizedZone(row.zone);
+  const matches = exact.get(`${row.loop}|${row.zone}`) || [];
+  const first = matches[0];
+  if (first) {
+    row.area = first.area || '';
+    row.location = first.location || '';
+    row.fixture = first.fixture || '';
+  }
+  const preservedNotes = matchNote(row.notes);
+  const reviewNote = matches.length > 1 ? `${matches.length} LIGHTING CONTROL PROGRAMMING matches; verify selected information` : '';
+  row.notes = [preservedNotes, reviewNote].filter(Boolean).join('; ');
+  row.status = matches.length === 1 ? 'matched' : matches.length > 1 ? 'ambiguous' : 'unmatched';
+  row.matchCount = matches.length;
+  return row;
+}
+
+export function refreshScheduleRows(scheduleRows, tables) {
+  const exact = sourceMatchIndex(tables);
+  return scheduleRows.map(row => applyScheduleMatch(row, exact))
+    .sort((left, right) => naturalCompare(left.loop, right.loop) || naturalCompare(left.zone, right.zone));
+}
+
 function inlineCell(reference, value, style = 7) {
   return `<c r="${reference}" t="inlineStr" s="${style}"><is><t xml:space="preserve">${xml(value)}</t></is></c>`;
 }
@@ -491,6 +539,16 @@ function textFormulaCell(reference, formula, style = 5, cached = '') {
 function normalizedDriversPerAddress(row) {
   const value = Number(row?.driversPerAddress || 1);
   return Number.isInteger(value) && value >= 2 && value <= 6 ? value : 1;
+}
+
+function fixtureQuantity(row) {
+  const value = Number(row?.quantity || 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+export function addressCount(row) {
+  const quantity = fixtureQuantity(row);
+  return quantity ? Math.ceil(quantity / normalizedDriversPerAddress(row)) : 0;
 }
 
 function scheduleNotes(row) {
@@ -514,23 +572,22 @@ function worksheetXml(rows, metadata, firstLoopIndex) {
     rowXml.push(`<row r="${currentRow}" ht="24" customHeight="1">${inlineCell(`A${currentRow}`, `DALI LOOP ${loop} · DEVICE ${firstLoopIndex + loopIndex + 1}`, 4)}</row>`);
     merges.push(`A${currentRow}:H${currentRow}`);
     currentRow++;
-    const headers = ['Loop', 'Zone', 'Group', 'Area', 'Location', 'Fixture', 'Quantity', 'Notes'];
+    const headers = ['Loop', 'Zone', 'Group', 'Area', 'Location', 'Fixture', 'Qty / Address', 'Notes'];
     rowXml.push(`<row r="${currentRow}" ht="28" customHeight="1">${headers.map((header, index) => inlineCell(`${String.fromCharCode(65 + index)}${currentRow}`, header, 3)).join('')}</row>`);
     currentRow++;
     const dataStart = currentRow;
     for (const [groupIndex, item] of group.rows.entries()) {
-      rowXml.push(`<row r="${currentRow}" ht="25" customHeight="1">${inlineCell(`A${currentRow}`, item.loop)}${inlineCell(`B${currentRow}`, `Z${item.zone}`)}${numberCell(`C${currentRow}`, groupIndex + 1)}${inlineCell(`D${currentRow}`, item.area)}${inlineCell(`E${currentRow}`, item.location)}${inlineCell(`F${currentRow}`, item.fixture)}${numberCell(`G${currentRow}`, item.quantity)}${inlineCell(`H${currentRow}`, scheduleNotes(item))}</row>`);
+      rowXml.push(`<row r="${currentRow}" ht="25" customHeight="1">${inlineCell(`A${currentRow}`, item.loop)}${inlineCell(`B${currentRow}`, `Z${item.zone}`)}${numberCell(`C${currentRow}`, groupIndex + 1)}${inlineCell(`D${currentRow}`, item.area)}${inlineCell(`E${currentRow}`, item.location)}${inlineCell(`F${currentRow}`, item.fixture)}${numberCell(`G${currentRow}`, addressCount(item))}${inlineCell(`H${currentRow}`, scheduleNotes(item))}</row>`);
       currentRow++;
     }
-    const loopTotal = group.rows.reduce((sum, item) => sum + Number(item.quantity || 0), 0);
-    const addressTerms = group.rows.map((item, index) => `ROUNDUP(G${dataStart + index}/${normalizedDriversPerAddress(item)},0)`);
-    const addressTotal = group.rows.reduce((sum, item) => sum + Math.ceil(Number(item.quantity || 0) / normalizedDriversPerAddress(item)), 0);
+    const addressTotal = group.rows.reduce((sum, item) => sum + addressCount(item), 0);
     const openAddresses = 64 - addressTotal;
     const unusedGroups = Math.max(0, 16 - group.rows.length);
     const totalStyle = addressTotal > 64 || group.rows.length > 16 ? 6 : 5;
-    const openAddressFormula = `IF(64-SUM(${addressTerms.join(',')})>=0,64-SUM(${addressTerms.join(',')})&" open addresses",ABS(64-SUM(${addressTerms.join(',')}))&" addresses over limit")`;
+    const addressRange = `G${dataStart}:G${currentRow - 1}`;
+    const openAddressFormula = `IF(64-SUM(${addressRange})>=0,64-SUM(${addressRange})&" open addresses",ABS(64-SUM(${addressRange}))&" addresses over limit")`;
     const openAddressLabel = openAddresses >= 0 ? `${openAddresses} open addresses` : `${Math.abs(openAddresses)} addresses over limit`;
-    rowXml.push(`<row r="${currentRow}" ht="28" customHeight="1">${inlineCell(`A${currentRow}`, `${loop} Loop Total`, totalStyle)}${inlineCell(`B${currentRow}`, '', totalStyle)}${inlineCell(`C${currentRow}`, `${unusedGroups} unused groups`, totalStyle)}${inlineCell(`D${currentRow}`, '', totalStyle)}${inlineCell(`E${currentRow}`, '', totalStyle)}${inlineCell(`F${currentRow}`, 'DALI address count (64 max)', totalStyle)}${formulaCell(`G${currentRow}`, `SUM(G${dataStart}:G${currentRow - 1})`, totalStyle, loopTotal)}${textFormulaCell(`H${currentRow}`, openAddressFormula, totalStyle, openAddressLabel)}</row>`);
+    rowXml.push(`<row r="${currentRow}" ht="28" customHeight="1">${inlineCell(`A${currentRow}`, `${loop} Loop Total`, totalStyle)}${inlineCell(`B${currentRow}`, '', totalStyle)}${inlineCell(`C${currentRow}`, `${unusedGroups} unused groups`, totalStyle)}${inlineCell(`D${currentRow}`, '', totalStyle)}${inlineCell(`E${currentRow}`, '', totalStyle)}${inlineCell(`F${currentRow}`, 'DALI address count (64 max)', totalStyle)}${formulaCell(`G${currentRow}`, `SUM(${addressRange})`, totalStyle, addressTotal)}${textFormulaCell(`H${currentRow}`, openAddressFormula, totalStyle, openAddressLabel)}</row>`);
     currentRow += 2;
   }
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetPr><tabColor rgb="FF007EA8"/></sheetPr><sheetViews><sheetView workbookViewId="0"><pane ySplit="4" topLeftCell="A5" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="15"/><cols><col min="1" max="1" width="20" customWidth="1"/><col min="2" max="2" width="15" customWidth="1"/><col min="3" max="3" width="19" customWidth="1"/><col min="4" max="4" width="22" customWidth="1"/><col min="5" max="5" width="29" customWidth="1"/><col min="6" max="6" width="27" customWidth="1"/><col min="7" max="7" width="13" customWidth="1"/><col min="8" max="8" width="32" customWidth="1"/></cols><sheetData>${rowXml.join('')}</sheetData><mergeCells count="${merges.length}">${merges.map(range => `<mergeCell ref="${range}"/>`).join('')}</mergeCells><pageMargins left="0.25" right="0.25" top="0.45" bottom="0.45" header="0.2" footer="0.2"/><pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0" paperSize="9"/></worksheet>`;
@@ -540,6 +597,8 @@ export async function buildScheduleWorkbook(scheduleRows, metadata, ZipCtor = gl
   if (!ZipCtor) throw new Error('The Excel exporter is unavailable.');
   const included = scheduleRows.filter(row => row.include !== false);
   if (!included.length) throw new Error('Select at least one schedule row to export.');
+  const invalid = included.find(row => !/^D\d+[A-Z]?$/.test(normalizedLoop(row.loop)) || !/^\d+[A-Z]?$/.test(normalizedZone(row.zone)));
+  if (invalid) throw new Error('Every exported row needs a valid DALI loop and zone. Refresh the schedule after correcting them.');
   const loops = [...new Set(included.map(row => upper(row.loop)))].sort(naturalCompare);
   const oversizedLoop = loops.find(loop => included.filter(row => upper(row.loop) === loop).length > 16);
   if (oversizedLoop) throw new Error(`${oversizedLoop} has more than 16 schedule rows. Remove or combine rows before exporting.`);
@@ -590,7 +649,7 @@ function init() {
     bluebeam: byId('dali-bluebeam-file'), pdf: byId('dali-lighting-control-file'), bluebeamStatus: byId('dali-bluebeam-status'), pdfStatus: byId('dali-pdf-status'),
     pageMode: byId('dali-page-mode'), pageInputWrap: byId('dali-page-input-wrap'), pageInput: byId('dali-page-input'), processPdf: byId('dali-process-pdf'),
     tablePanel: byId('dali-table-panel'), tableList: byId('dali-table-list'), selectAll: byId('dali-select-all'), clearAll: byId('dali-clear-all'),
-    combine: byId('dali-combine'), reviewPanel: byId('dali-review-panel'), reviewBody: byId('dali-review-body'), summary: byId('dali-review-summary'),
+    combine: byId('dali-combine'), reviewPanel: byId('dali-review-panel'), reviewBody: byId('dali-review-body'), summary: byId('dali-review-summary'), refresh: byId('dali-refresh'),
     exportButton: byId('dali-export'), project: byId('dali-project'), creator: byId('dali-creator'), revision: byId('dali-revision'), panel: byId('dali-panel'),
   };
   const state = { bluebeam: [], tables: [], schedule: [] };
@@ -671,21 +730,68 @@ function init() {
     }));
     updateCombine();
   }
+  function scheduleGroups() {
+    const groups = new Map();
+    for (const row of state.schedule) {
+      const loop = normalizedLoop(row.loop);
+      if (!groups.has(loop)) groups.set(loop, []);
+      groups.get(loop).push(row);
+    }
+    return [...groups.entries()]
+      .sort(([left], [right]) => naturalCompare(left, right))
+      .map(([loop, rows]) => ({ loop, rows }));
+  }
+
+  function addScheduleRow(loop) {
+    const rows = state.schedule.filter(row => normalizedLoop(row.loop) === loop);
+    if (rows.length >= 16) {
+      window.alert(`${loop || 'This loop'} already has all 16 groups.`);
+      return;
+    }
+    const row = {
+      id: `dali-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      include: true, loop, zone: '', area: '', location: '', fixture: '',
+      quantity: 1, driversPerAddress: 1, notes: '', status: 'unmatched', matchCount: 0,
+    };
+    state.schedule.push(row);
+    renderReview();
+    elements.reviewBody.querySelector(`[data-row-id="${row.id}"] [data-field="zone"]`)?.focus();
+  }
+
+  function rematchRows(rows) {
+    const exact = sourceMatchIndex(state.tables);
+    rows.forEach(row => applyScheduleMatch(row, exact));
+  }
+
   function renderReview() {
     const matched = state.schedule.filter(row => row.status === 'matched').length;
     const review = state.schedule.length - matched;
+    const fixtureTotal = state.schedule.filter(row => row.include !== false).reduce((sum, row) => sum + fixtureQuantity(row), 0);
+    const addressTotal = state.schedule.filter(row => row.include !== false).reduce((sum, row) => sum + addressCount(row), 0);
     elements.reviewPanel.hidden = !state.schedule.length;
-    elements.summary.innerHTML = `<strong>${matched} matched</strong><span>${review} need${review === 1 ? 's' : ''} review</span><span>${state.schedule.reduce((sum, row) => sum + Number(row.quantity || 0), 0)} total fixtures</span>`;
-    elements.reviewBody.innerHTML = state.schedule.map(row => {
-      const drivers = normalizedDriversPerAddress(row);
-      return `<tr data-row-id="${row.id}" data-status="${row.status}"><td><input type="checkbox" data-field="include" ${row.include ? 'checked' : ''} aria-label="Include row"></td><td><input data-field="loop" value="${escapeHtml(row.loop)}"></td><td><input data-field="zone" value="${escapeHtml(row.zone)}"></td><td><input data-field="area" value="${escapeHtml(row.area)}"></td><td><input data-field="location" value="${escapeHtml(row.location)}"></td><td><input data-field="fixture" value="${escapeHtml(row.fixture)}"></td><td><div class="dali-quantity-control"><input type="number" min="0" step="1" data-field="quantity" value="${escapeHtml(row.quantity)}"><button class="dali-driver-button${drivers > 1 ? ' active' : ''}" type="button" aria-label="Set drivers per address" aria-expanded="false" title="${drivers > 1 ? `${drivers} drivers per address` : 'Set multiple drivers per address'}">${drivers > 1 ? `★${drivers}` : '☆'}</button><select class="dali-driver-select" data-field="driversPerAddress" aria-label="Drivers per address" hidden><option value="1">One per address</option>${[2, 3, 4, 5, 6].map(value => `<option value="${value}" ${drivers === value ? 'selected' : ''}>${value} drivers</option>`).join('')}</select></div></td><td><span class="dali-match ${row.status}">${row.status === 'matched' ? 'Matched' : row.status === 'ambiguous' ? 'Verify match' : 'Not found'}</span></td><td><button class="dali-delete-row" type="button" aria-label="Delete schedule row">×</button></td></tr>`;
+    elements.summary.innerHTML = `<strong>${matched} matched</strong><span>${review} need${review === 1 ? 's' : ''} review</span><span>${fixtureTotal} total fixtures</span><span>${addressTotal} DALI addresses</span>`;
+    elements.reviewBody.innerHTML = scheduleGroups().map((group, loopIndex) => {
+      let groupNumber = 0;
+      const included = group.rows.filter(row => row.include !== false);
+      const groupAddresses = included.reduce((sum, row) => sum + addressCount(row), 0);
+      const openAddresses = 64 - groupAddresses;
+      const unusedGroups = Math.max(0, 16 - included.length);
+      const overLimit = included.length > 16 || groupAddresses > 64;
+      const rows = group.rows.map(row => {
+        const drivers = normalizedDriversPerAddress(row);
+        const addresses = addressCount(row);
+        const displayGroup = row.include !== false ? ++groupNumber : '—';
+        return `<tr data-row-id="${escapeHtml(row.id)}" data-status="${row.status}"${row.include === false ? ' data-excluded="true"' : ''}><td><input type="checkbox" data-field="include" ${row.include !== false ? 'checked' : ''} aria-label="Include row"></td><td><input class="dali-row-loop" data-field="loop" value="${escapeHtml(row.loop)}" aria-label="Row loop" title="Change this loop, then choose Refresh schedule to move the row"></td><td><input data-field="zone" value="${escapeHtml(row.zone)}" aria-label="Zone"></td><td class="dali-group-number">${displayGroup}</td><td><input data-field="area" value="${escapeHtml(row.area)}"></td><td><input data-field="location" value="${escapeHtml(row.location)}"></td><td><input data-field="fixture" value="${escapeHtml(row.fixture)}"></td><td><div class="dali-quantity-control"><input type="number" min="0" step="1" data-field="quantity" value="${escapeHtml(row.quantity)}" aria-label="Fixture quantity"><button class="dali-driver-button${drivers > 1 ? ' active' : ''}" type="button" aria-label="Set drivers per address" aria-expanded="false" title="${drivers > 1 ? `${drivers} drivers per address` : 'Set multiple drivers per address'}">${drivers > 1 ? `★${drivers}` : '☆'}</button><select class="dali-driver-select" data-field="driversPerAddress" aria-label="Drivers per address" hidden><option value="1">One per address</option>${[2, 3, 4, 5, 6].map(value => `<option value="${value}" ${drivers === value ? 'selected' : ''}>${value} drivers</option>`).join('')}</select><output class="dali-address-result" aria-label="${addresses} DALI addresses" title="${fixtureQuantity(row)} fixtures divided by ${drivers} driver${drivers === 1 ? '' : 's'} per address">= ${addresses}</output></div></td><td><input data-field="notes" value="${escapeHtml(scheduleNotes(row))}" aria-label="Notes"></td><td><span class="dali-match ${row.status}">${row.status === 'matched' ? 'Matched' : row.status === 'ambiguous' ? 'Verify match' : 'Not found'}</span></td><td><button class="dali-delete-row" type="button" aria-label="Delete schedule row">×</button></td></tr>`;
+      }).join('');
+      return `<section class="dali-loop-section${overLimit ? ' over-limit' : ''}" data-loop-section="${escapeHtml(group.loop)}"><header class="dali-loop-section-head"><div><span>DALI loop</span><label><span class="sr-only">Loop name</span><input class="dali-loop-editor" data-loop-editor="${escapeHtml(group.loop)}" value="${escapeHtml(group.loop)}" aria-label="Loop name"></label><strong>Device ${loopIndex + 1}</strong></div><button class="tool-button" type="button" data-add-loop-row="${escapeHtml(group.loop)}" ${group.rows.length >= 16 ? 'disabled' : ''}>+ Add row</button></header><div class="dali-review-wrap"><table class="dali-review-table"><thead><tr><th>Use</th><th>Loop</th><th>Zone</th><th>Group</th><th>Area</th><th>Location</th><th>Fixture</th><th>Qty / address</th><th>Notes</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody><tfoot><tr><td colspan="3"><strong>${escapeHtml(group.loop || 'Unassigned')} Loop Total</strong></td><td>${unusedGroups} unused groups</td><td colspan="2"></td><td>DALI address count (64 max)</td><td>${groupAddresses}</td><td colspan="3" class="${openAddresses < 0 ? 'over-limit' : ''}">${openAddresses >= 0 ? `${openAddresses} open addresses` : `${Math.abs(openAddresses)} addresses over limit`}</td></tr></tfoot></table></div></section>`;
     }).join('');
-    elements.reviewBody.querySelectorAll('tr').forEach(rowElement => {
+    elements.reviewBody.querySelectorAll('[data-row-id]').forEach(rowElement => {
       const row = state.schedule.find(item => item.id === rowElement.dataset.rowId);
       rowElement.querySelectorAll('[data-field]').forEach(input => input.addEventListener('change', () => {
         const field = input.dataset.field;
         row[field] = field === 'include' ? input.checked : field === 'quantity' || field === 'driversPerAddress' ? Number(input.value) : clean(input.value);
-        if (field === 'driversPerAddress') renderReview();
+        if (field === 'zone') rematchRows([row]);
+        if (field === 'include' || field === 'zone' || field === 'quantity' || field === 'driversPerAddress') renderReview();
       }));
       const driverButton = rowElement.querySelector('.dali-driver-button');
       const driverSelect = rowElement.querySelector('.dali-driver-select');
@@ -696,6 +802,15 @@ function init() {
       });
       rowElement.querySelector('.dali-delete-row').addEventListener('click', () => { state.schedule = state.schedule.filter(item => item.id !== row.id); renderReview(); });
     });
+    elements.reviewBody.querySelectorAll('[data-loop-editor]').forEach(input => input.addEventListener('change', () => {
+      const previousLoop = normalizedLoop(input.dataset.loopEditor);
+      const nextLoop = normalizedLoop(input.value);
+      const rows = state.schedule.filter(row => normalizedLoop(row.loop) === previousLoop);
+      rows.forEach(row => { row.loop = nextLoop; });
+      rematchRows(rows);
+      renderReview();
+    }));
+    elements.reviewBody.querySelectorAll('[data-add-loop-row]').forEach(button => button.addEventListener('click', () => addScheduleRow(normalizedLoop(button.dataset.addLoopRow))));
   }
 
   elements.bluebeam.addEventListener('change', async () => {
@@ -731,10 +846,18 @@ function init() {
   });
   elements.selectAll.addEventListener('click', () => { state.tables.forEach(table => { table.selected = true; }); renderTables(); });
   elements.clearAll.addEventListener('click', () => { state.tables.forEach(table => { table.selected = false; }); renderTables(); });
-  elements.combine.addEventListener('click', () => { state.schedule = joinSchedule(state.bluebeam, state.tables); renderReview(); elements.reviewPanel.scrollIntoView({ behavior: 'smooth', block: 'start' }); });
+  elements.combine.addEventListener('click', () => { state.schedule = refreshScheduleRows(joinSchedule(state.bluebeam, state.tables), state.tables); renderReview(); elements.reviewPanel.scrollIntoView({ behavior: 'smooth', block: 'start' }); });
+  elements.refresh.addEventListener('click', () => {
+    state.schedule = refreshScheduleRows(state.schedule, state.tables);
+    renderReview();
+    elements.refresh.textContent = 'Schedule refreshed';
+    window.setTimeout(() => { elements.refresh.textContent = 'Refresh schedule'; }, 1400);
+  });
   elements.exportButton.addEventListener('click', async () => {
     elements.exportButton.disabled = true; elements.exportButton.textContent = 'Building Excel schedule…';
     try {
+      state.schedule = refreshScheduleRows(state.schedule, state.tables);
+      renderReview();
       const metadata = { project: clean(elements.project.value), creator: clean(elements.creator.value), revision: clean(elements.revision.value), panel: clean(elements.panel.value), date: new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short', day: 'numeric' }).format(new Date()) };
       const blob = await buildScheduleWorkbook(state.schedule, metadata);
       downloadBlob(blob, `${safeName(metadata.project)}_DALI_Schedule.xlsx`);
@@ -756,7 +879,13 @@ function init() {
     if (!payload || !Array.isArray(payload.bluebeam) || !Array.isArray(payload.tables) || !Array.isArray(payload.schedule)) throw new Error('This Apple DALI work file is invalid.');
     state.bluebeam = payload.bluebeam.slice(0, 10000);
     state.tables = payload.tables.slice(0, 500);
-    state.schedule = payload.schedule.slice(0, 10000);
+    state.schedule = payload.schedule.slice(0, 10000).map((row, index) => ({
+      ...row,
+      id: clean(row.id) || `dali-saved-${Date.now()}-${index}`,
+      include: row.include !== false,
+      driversPerAddress: normalizedDriversPerAddress(row),
+      quantity: fixtureQuantity(row),
+    }));
     elements.pageMode.value = payload.pageMode === 'manual' ? 'manual' : 'auto';
     elements.pageInput.value = clean(payload.pageInput);
     const metadata = payload.metadata || {};
@@ -776,4 +905,4 @@ if (typeof document !== 'undefined') {
   else init();
 }
 
-globalThis.ProjectToolsDali = Object.freeze({ parseLoopZone, parseCsv, parseBluebeamRows, parsePdfPageSelection, hasLightingControlProgrammingTitle, extractPdfTablesFromItems, extractCandidateTablesFromItems, extractLightingControlPdf, joinSchedule, buildScheduleWorkbook });
+globalThis.ProjectToolsDali = Object.freeze({ parseLoopZone, parseCsv, parseBluebeamRows, parsePdfPageSelection, hasLightingControlProgrammingTitle, extractPdfTablesFromItems, extractCandidateTablesFromItems, extractLightingControlPdf, joinSchedule, refreshScheduleRows, addressCount, buildScheduleWorkbook });

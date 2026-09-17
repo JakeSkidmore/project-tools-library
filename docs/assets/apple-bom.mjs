@@ -5,6 +5,8 @@ const safeName = value => clean(value || 'Apple BOM').replace(/[<>:"/\\|?*\x00-\
 const pdfText = value => clean(value).normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/[–—]/g, '-').replace(/[^\x20-\x7e]/g, '');
 const PRESET_KEY = 'project-tools-apple-bom-presets-v1';
 const DRAFT_KEY = 'project-tools-apple-bom-draft-v1';
+const PDF_MODULE_URL = new URL('./pdf.min.mjs', import.meta.url).href;
+const PDF_WORKER_URL = new URL('./pdf.worker.compat.mjs', import.meta.url).href;
 
 const defaultSections = [
   { id: 'cpp-panel', group: 'CPP-1', label: 'Panel', note: 'One panel row is included by default.' },
@@ -64,6 +66,154 @@ function parseCatalogs() { try { return JSON.parse(document.getElementById('budg
 function bytesToBase64(bytes) { let result = ''; for (let index = 0; index < bytes.length; index += 0x8000) result += String.fromCharCode(...bytes.subarray(index, index + 0x8000)); return btoa(result); }
 function download(blob, name) { const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = name; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(link.href), 30000); }
 function csvValue(value) { const text = String(value ?? ''); return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text; }
+
+function groupQuoteLines(items) {
+  const positioned = (items || []).map(value => ({
+    text: clean(value.str),
+    x: Number(value.transform?.[4] ?? value.x ?? 0),
+    y: Number(value.transform?.[5] ?? value.y ?? 0),
+    height: Number(value.height || 0),
+  })).filter(value => value.text).sort((left, right) => right.y - left.y || left.x - right.x);
+  const lines = [];
+  for (const value of positioned) {
+    let line = lines.find(candidate => Math.abs(candidate.y - value.y) <= 2.3);
+    if (!line) { line = { y: value.y, items: [] }; lines.push(line); }
+    line.items.push(value);
+  }
+  return lines.sort((left, right) => right.y - left.y).map(line => {
+    line.items.sort((left, right) => left.x - right.x);
+    return { ...line, text: clean(line.items.map(value => value.text).join(' ')) };
+  });
+}
+
+function quoteColumn(line, minimum, maximum) {
+  return clean(line.items.filter(value => value.x >= minimum && value.x < maximum).map(value => value.text).join(' '));
+}
+
+function titleCaseProject(value) {
+  const small = new Set(['at', 'and', 'of', 'the', 'in', 'on']);
+  return clean(value).toLowerCase().split(' ').map((word, index) => index && small.has(word) ? word : word.replace(/(^|[-/])([a-z])/g, (_match, prefix, letter) => `${prefix}${letter.toUpperCase()}`)).join(' ');
+}
+
+function normalizeQuoteSku(value) {
+  const sku = clean(value).toUpperCase().replace(/\s+ENGRAVED\b.*$/, '');
+  if (sku === 'GLA-ISP-4R-DC-TERM') return 'GLA-ISP-4R-TERM';
+  if (sku === 'FP-G1-W-S') return 'FP-G1-W';
+  return sku;
+}
+
+const quoteReplacementDescriptions = {
+  'GLEX-FT-56-HC': 'GL FEED THRU ENCLOSURE',
+  'GLXX-CTRL': 'CRESNET CONTROL MODULE',
+  'GLXX-HDSW16': '16 CHANNEL HEAVY DUTY SWITCH MODULE',
+};
+
+function quoteSection(room, sku) {
+  const location = clean(room).toUpperCase();
+  if (/^(?:CCP|CPP)-?\d+\b/.test(location)) return sku.startsWith('GLEX-FT-') ? 'cpp-panel' : 'cpp-modules';
+  if (/^RP-?\d+\b/.test(location)) return sku.startsWith('GLEX-FT-') ? 'rp-panel' : 'rp-relay';
+  if (location.includes('INTERFACE')) return 'device-networked';
+  if (location.includes('LINE VOLTAGE')) return 'device-standalone';
+  if (location.includes('MISC')) return 'device-misc';
+  return '';
+}
+
+const quoteSortOrder = new Map([
+  'GLEX-FT-84-HC', 'DIN-AP4', 'DIN-PWS60', 'DIN-HUB', 'DIN-DLI', 'CEN-SWPOE-5AC', 'DIN-DMX-2UNIVERSE', 'GLA-ISP-4R-TERM',
+  'GLEX-FT-56-HC', 'GLXX-CTRL', 'GLXX-HDSW16', 'GLR-HD-1P',
+  'CM2-KPCN', 'GLS-ODT-C-CN', 'TSW-770-B-S', 'GLA-DT-WLS-1-W',
+  'CM2-FP-G1-W-S', 'FP-G1-W', 'GLS-PLS-120/277', 'SW-3SERIES-BACNET-50+',
+].map((sku, index) => [sku, index]));
+
+function dateToInput(value) {
+  const match = clean(value).match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  return match ? `${match[3]}-${match[1].padStart(2, '0')}-${match[2].padStart(2, '0')}` : clean(value);
+}
+
+function parseCdtlQuotePages(pages) {
+  const pageLines = (pages || []).map(page => ({ pageNumber: page.pageNumber, lines: groupQuoteLines(page.items), items: page.items || [] }));
+  const rawRows = [];
+  for (const page of pageLines) {
+    let room = '';
+    let previousRow = null;
+    for (const line of page.lines) {
+      const roomMatch = line.text.match(/\bRoom:\s*(.+)$/i);
+      if (roomMatch) { room = clean(roomMatch[1]); previousRow = null; continue; }
+      if (!room) continue;
+      const lineItem = quoteColumn(line, 18, 42);
+      const quantityText = quoteColumn(line, 42, 58);
+      const model = quoteColumn(line, 58, 164);
+      const description = quoteColumn(line, 164, 448);
+      const quantity = Number(quantityText);
+      if (/^\d+$/.test(lineItem) && Number.isFinite(quantity) && quantity >= 0 && model) {
+        previousRow = { room, model, description, quantity, pageNumber: page.pageNumber };
+        rawRows.push(previousRow);
+      } else if (previousRow && description && !/^(?:description|lighting|total|unit price|ext price|discount)\b/i.test(description)) {
+        previousRow.description = clean(`${previousRow.description} ${description}`);
+      }
+    }
+  }
+
+  const allText = pageLines.flatMap(page => page.lines.map(line => line.text)).join('\n');
+  const firstPage = pageLines[0];
+  const titleItems = (firstPage?.items || []).map(value => ({ text: clean(value.str), x: Number(value.transform?.[4] ?? 0), y: Number(value.transform?.[5] ?? 0), height: Number(value.height || 0) }))
+    .filter(value => value.text && value.x < 430 && value.height >= 20 && value.y > 460 && value.y < 650).sort((left, right) => right.y - left.y || left.x - right.x);
+  let title = clean(titleItems.map(value => value.text).join(' '));
+  title = title.replace(/^APPLE STORE\s+/i, '');
+  const titleParts = title.split(/\s+-\s+/).map(clean).filter(Boolean);
+  const project = titleParts.length >= 2 ? `${titleParts[0]} - ${titleCaseProject(titleParts[1])}` : titleCaseProject(title);
+  const date = allText.match(/Date Created:\s*(\d{1,2}\/\d{1,2}\/\d{4})/i)?.[1] || '';
+  const preparedBy = allText.match(/Prepared By:\s*([^\n]+)/i)?.[1] || '';
+  const revisionMatches = [...allText.matchAll(/\bREV\s*0?(\d+)\s+(\d{1,2}\/\d{1,2}\/\d{4})\s+([A-Z]{2,5})\b/gi)];
+  const revision = revisionMatches.at(-1);
+
+  const expandedRows = [];
+  for (const row of rawRows) {
+    const sku = normalizeQuoteSku(row.model);
+    if (!sku || sku.startsWith('CONFIG:') || sku === 'DOCUMENTATION') continue;
+    if (sku === 'GLPX-HDSW-FT-56-NR') {
+      for (const replacement of ['GLEX-FT-56-HC', 'GLXX-CTRL', 'GLXX-HDSW16']) expandedRows.push({ section: quoteSection(row.room, replacement), sku: replacement, description: quoteReplacementDescriptions[replacement], quantity: row.quantity });
+      continue;
+    }
+    expandedRows.push({ section: quoteSection(row.room, sku), sku, description: clean(row.description), quantity: row.quantity });
+  }
+  const aggregate = new Map();
+  for (const row of expandedRows.filter(row => row.section)) {
+    const key = `${row.section}\u0000${row.sku}`;
+    const current = aggregate.get(key);
+    if (current) current.quantity += row.quantity;
+    else aggregate.set(key, { ...row });
+  }
+  const sectionOrder = new Map(defaultSections.map((section, index) => [section.id, index]));
+  const rows = [...aggregate.values()].sort((left, right) => (sectionOrder.get(left.section) ?? 99) - (sectionOrder.get(right.section) ?? 99) || (quoteSortOrder.get(left.sku) ?? 999) - (quoteSortOrder.get(right.sku) ?? 999) || left.sku.localeCompare(right.sku));
+  if (!rows.length) throw new Error('No usable CDTL quote line items were found. Confirm this is a line-item CDTL quote PDF.');
+  return {
+    metadata: {
+      project,
+      creator: revision?.[3] || clean(preparedBy),
+      date: dateToInput(revision?.[2] || date),
+      revision: revision?.[1]?.padStart(2, '0') || clean(allText.match(/Quote\s*#?\s*:?\s*\d+\s+Rev\.?\s*(\d+)/i)?.[1]),
+    },
+    quoteNumber: clean(allText.match(/Quote\s*#?\s*:?\s*(\d+)/i)?.[1]),
+    rows,
+    sourceRowCount: rawRows.length,
+  };
+}
+
+async function parseCdtlQuotePdf(arrayBuffer, onProgress = () => {}) {
+  const pdfjs = await import(PDF_MODULE_URL);
+  pdfjs.GlobalWorkerOptions.workerSrc = PDF_WORKER_URL;
+  const pdf = await pdfjs.getDocument({ data: new Uint8Array(arrayBuffer) }).promise;
+  const pages = [];
+  for (let index = 1; index <= pdf.numPages; index++) {
+    onProgress(index, pdf.numPages);
+    const page = await pdf.getPage(index);
+    const text = await page.getTextContent();
+    pages.push({ pageNumber: index, items: text.items });
+  }
+  if (pages.reduce((sum, page) => sum + page.items.length, 0) < 20) throw new Error('This quote does not contain a usable text layer. Export a searchable PDF and try again.');
+  return parseCdtlQuotePages(pages);
+}
 
 function xlsxCell(reference, value, style = 0) {
   if (typeof value === 'number') return `<c r="${reference}" s="${style}"><v>${value}</v></c>`;
@@ -142,13 +292,53 @@ function buildCsv(rows, sectionDefinitions = defaultSections) {
 function init() {
   const root = document.getElementById('apple-bom-view'); if (!root) return;
   const byId = id => document.getElementById(id);
-  const elements = { preset: byId('apple-bom-preset'), catalog: byId('apple-bom-catalog'), project: byId('apple-bom-project'), creator: byId('apple-bom-creator'), date: byId('apple-bom-date'), revision: byId('apple-bom-revision'), loadPreset: byId('apple-bom-load-preset'), addSection: byId('apple-bom-add-section'), savePreset: byId('apple-bom-save-preset'), deletePreset: byId('apple-bom-delete-preset'), sections: byId('apple-bom-sections'), pdf: byId('apple-bom-export-pdf'), xlsx: byId('apple-bom-export-xlsx'), csv: byId('apple-bom-export-csv'), documents: byId('apple-bom-export-documents'), export: byId('apple-bom-export'), status: byId('apple-bom-status') };
+  const elements = { preset: byId('apple-bom-preset'), catalog: byId('apple-bom-catalog'), project: byId('apple-bom-project'), creator: byId('apple-bom-creator'), date: byId('apple-bom-date'), revision: byId('apple-bom-revision'), loadPreset: byId('apple-bom-load-preset'), importQuote: byId('apple-bom-import-quote'), quoteFile: byId('apple-bom-quote-file'), addSection: byId('apple-bom-add-section'), savePreset: byId('apple-bom-save-preset'), deletePreset: byId('apple-bom-delete-preset'), sections: byId('apple-bom-sections'), pdf: byId('apple-bom-export-pdf'), xlsx: byId('apple-bom-export-xlsx'), csv: byId('apple-bom-export-csv'), documents: byId('apple-bom-export-documents'), documentTypes: byId('apple-bom-document-types'), documentOptions: byId('apple-bom-document-options'), documentRecommended: byId('apple-bom-doc-recommended'), documentAll: byId('apple-bom-doc-all'), documentNone: byId('apple-bom-doc-none'), export: byId('apple-bom-export'), status: byId('apple-bom-status') };
   const catalogs = parseCatalogs();
   const state = { sections: cloneSections(), rows: [], customPresets: loadCustomPresets(), activeRow: '', catalogId: catalogs[0]?.id || '' };
   elements.date.value = new Date().toISOString().slice(0, 10);
   elements.catalog.innerHTML = catalogs.map(list => `<option value="${escapeHtml(list.id)}">${escapeHtml(list.label || list.name || list.id)}</option>`).join('') || '<option value="">No catalog available</option>';
 
   function setStatus(message, stateName = '') { elements.status.textContent = message; elements.status.dataset.state = stateName; }
+  function matchedDocuments(rows = state.rows) {
+    const skus = [...new Set(rows.map(row => clean(row.sku)).filter(Boolean))];
+    return globalThis.CrestronBudgetTool?.matchDocuments(skus) || { count: 0, bytes: 0, documents: [], missingSkus: [] };
+  }
+  function documentTypeLabel(documentRecord) { return clean(documentRecord.displayDocumentType || documentRecord.documentType || 'Other Documents'); }
+  function prepareDocumentTypes(matches = matchedDocuments()) {
+    const previous = new Map([...elements.documentOptions.querySelectorAll('input')].map(input => [input.value, input.checked]));
+    const counts = new Map();
+    for (const documentRecord of matches.documents || []) {
+      const label = documentTypeLabel(documentRecord);
+      counts.set(label, (counts.get(label) || 0) + 1);
+    }
+    elements.documentOptions.innerHTML = [...counts].sort((left, right) => left[0].localeCompare(right[0])).map(([label, count]) => `<label><input type="checkbox" value="${escapeHtml(label)}" ${previous.has(label) ? (previous.get(label) ? 'checked' : '') : 'checked'}><span>${escapeHtml(label)} <small>(${count})</small></span></label>`).join('') || '<p class="apple-bom-empty">No matched product documents were found for the current parts.</p>';
+    elements.documentTypes.hidden = !elements.documents.checked;
+    return matches;
+  }
+  function selectedDocumentTypes() { return new Set([...elements.documentOptions.querySelectorAll('input:checked')].map(input => input.value)); }
+  function filterDocumentMatches(matches) {
+    const selected = selectedDocumentTypes();
+    const documents = (matches.documents || []).filter(documentRecord => selected.has(documentTypeLabel(documentRecord)));
+    return { ...matches, count: documents.length, documents, hashes: documents.map(documentRecord => documentRecord.sha), bytes: documents.reduce((sum, documentRecord) => sum + (Number(documentRecord.bytes) || 0), 0) };
+  }
+  function catalogDescription(sku, fallback) {
+    const matches = globalThis.CrestronBudgetTool?.matchProducts(sku, state.catalogId, 8) || [];
+    const canonical = clean(sku).toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const exact = matches.find(match => clean(match.sku).toUpperCase().replace(/[^A-Z0-9]/g, '') === canonical);
+    return clean(exact?.description || exact?.name || fallback);
+  }
+  function applyQuote(result) {
+    state.sections = cloneSections();
+    state.rows = result.rows.map(row => ({ ...item(row.section, row.sku, catalogDescription(row.sku, row.description)), quantity: Math.max(0, Number(row.quantity) || 0) }));
+    const metadata = result.metadata || {};
+    elements.project.value = clean(metadata.project);
+    elements.creator.value = clean(metadata.creator);
+    elements.date.value = clean(metadata.date) || new Date().toISOString().slice(0, 10);
+    elements.revision.value = clean(metadata.revision);
+    state.activeRow = '';
+    render();
+    if (elements.documents.checked) prepareDocumentTypes();
+  }
   function saveDraft() { try { localStorage.setItem(DRAFT_KEY, JSON.stringify(serialize())); } catch {} }
   function refreshPresets(selected) {
     const custom = Object.entries(state.customPresets).map(([id, preset]) => `<option value="custom:${escapeHtml(id)}">${escapeHtml(preset.name)}</option>`).join('');
@@ -237,6 +427,35 @@ function init() {
   elements.deletePreset.addEventListener('click', () => { const id = elements.preset.value.replace(/^custom:/, ''); const preset = state.customPresets[id]; if (!preset || !confirm(`Delete preset “${preset.name}”?`)) return; delete state.customPresets[id]; saveCustomPresets(state.customPresets); refreshPresets('zum'); setStatus('Custom preset deleted.', 'ready'); });
   [elements.project, elements.creator, elements.date, elements.revision].forEach(input => input.addEventListener('change', saveDraft));
 
+  elements.importQuote.addEventListener('click', () => elements.quoteFile.click());
+  elements.quoteFile.addEventListener('change', async () => {
+    const file = elements.quoteFile.files?.[0];
+    elements.quoteFile.value = '';
+    if (!file) return;
+    if (state.rows.some(row => clean(row.sku) && Number(row.quantity) > 0) && !confirm('Replace the current Apple BOM quantities and parts with this CDTL quote?')) return;
+    elements.importQuote.disabled = true;
+    elements.importQuote.textContent = 'Reading quote…';
+    setStatus(`Reading ${file.name}…`);
+    try {
+      const result = await parseCdtlQuotePdf(await file.arrayBuffer(), (page, total) => setStatus(`Reading CDTL quote page ${page} of ${total}…`));
+      applyQuote(result);
+      setStatus(`Quote ${result.quoteNumber || file.name} imported: ${result.rows.length} BOM line${result.rows.length === 1 ? '' : 's'} populated.`, 'ready');
+    } catch (error) {
+      setStatus(error.message || 'The CDTL quote could not be imported.', 'error');
+    } finally {
+      elements.importQuote.disabled = false;
+      elements.importQuote.textContent = 'Import CDTL Quote';
+    }
+  });
+
+  elements.documents.addEventListener('change', () => {
+    elements.documentTypes.hidden = !elements.documents.checked;
+    if (elements.documents.checked) prepareDocumentTypes();
+  });
+  elements.documentAll.addEventListener('click', () => elements.documentOptions.querySelectorAll('input').forEach(input => { input.checked = true; }));
+  elements.documentNone.addEventListener('click', () => elements.documentOptions.querySelectorAll('input').forEach(input => { input.checked = false; }));
+  elements.documentRecommended.addEventListener('click', () => elements.documentOptions.querySelectorAll('input').forEach(input => { input.checked = /spec|installation|quick start|product manual|user guide/i.test(input.value); }));
+
   elements.export.addEventListener('click', async () => {
     const formats = [elements.pdf.checked && 'pdf', elements.xlsx.checked && 'xlsx', elements.csv.checked && 'csv'].filter(Boolean);
     if (!formats.length) { setStatus('Choose at least one export format.', 'error'); return; }
@@ -249,7 +468,12 @@ function init() {
       if (elements.pdf.checked) files.push({ name: `${stem}.pdf`, mimeType: 'application/pdf', bytes: await buildPdf(usableRows, metadata, state.sections) });
       if (elements.xlsx.checked) files.push({ name: `${stem}.xlsx`, mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', bytes: await buildXlsx(usableRows, metadata, state.sections) });
       if (elements.csv.checked) files.push({ name: `${stem}.csv`, mimeType: 'text/csv;charset=utf-8', bytes: buildCsv(usableRows, state.sections) });
-      const matches = elements.documents.checked ? globalThis.CrestronBudgetTool?.matchDocuments([...new Set(usableRows.map(row => row.sku))]) : null;
+      let matches = null;
+      if (elements.documents.checked) {
+        const allMatches = prepareDocumentTypes(matchedDocuments(usableRows));
+        matches = filterDocumentMatches(allMatches);
+        if (!matches.documents.length) throw new Error('Select at least one matched product document type before exporting.');
+      }
       const endpoint = globalThis.CrestronBudgetTool?.applicationEndpoint('/api/export');
       if (endpoint) {
         const response = await fetch(endpoint, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ packageName: stem, includeDocuments: Boolean(elements.documents.checked), files: files.map(file => ({ name: file.name, mimeType: file.mimeType, base64: bytesToBase64(file.bytes) })), documents: matches?.documents || [] }) });
@@ -272,4 +496,4 @@ if (typeof document !== 'undefined') {
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true }); else init();
 }
 
-export { builtIns, defaultSections as sections, buildCsv, buildPdf, buildXlsx };
+export { builtIns, defaultSections as sections, buildCsv, buildPdf, buildXlsx, groupQuoteLines, parseCdtlQuotePages, parseCdtlQuotePdf };

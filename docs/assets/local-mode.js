@@ -11,9 +11,24 @@
   const HANDLE_LIBRARY = 'library';
   const HANDLE_BUDGET = 'budget';
   const PAGE_ROOT = new URL('./', location.href);
+  const DOCUMENT_ROOT_CANDIDATES = [
+    [],
+    ['documents'],
+    ['Project Tools Library', 'documents'],
+    ['Project Tools Content Library', 'Project Tools Library', 'documents'],
+  ];
+  const BUDGET_ROOT_CANDIDATES = [
+    [],
+    ['Source Price Lists'],
+    ['Budget Data', 'Source Price Lists'],
+    ['Project Tools Library', 'Budget Data', 'Source Price Lists'],
+    ['Project Tools Content Library', 'Project Tools Library', 'Budget Data', 'Source Price Lists'],
+  ];
   let databasePromise;
   let libraryHandle = null;
   let budgetHandle = null;
+  const documentLayoutCache = new WeakMap();
+  const budgetLayoutCache = new WeakMap();
   let settingsDialog = null;
   let settingsButton = null;
   let libraryStatus = null;
@@ -189,16 +204,102 @@
     return handle.getFile();
   }
 
-  async function firstAvailable(root, candidates) {
-    let lastError = null;
-    for (const candidate of candidates) {
-      try { return await fileAt(root, candidate); } catch (error) { lastError = error; }
-    }
-    throw lastError || new Error('The requested file was not found.');
+  function pathParts(value) {
+    return String(value || '').split('/').map(part => {
+      try { return decodeURIComponent(part); } catch (_) { return part; }
+    }).filter(Boolean);
   }
 
-  function pathParts(value) {
-    return String(value || '').split('/').map(part => decodeURIComponent(part)).filter(Boolean);
+  function libraryRecords() {
+    try {
+      const records = JSON.parse(document.getElementById('library-data')?.textContent || '[]');
+      return Array.isArray(records) ? records : [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function budgetSourceFiles() {
+    try {
+      const catalog = JSON.parse(document.getElementById('budget-catalog')?.textContent || '{}');
+      return [...new Set((catalog.priceLists || []).map(list => String(list.sourceFile || '').trim()).filter(Boolean))];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function documentCandidate(layout, insideParts, filename) {
+    return [...layout.prefix, ...(layout.mode === 'tree' ? insideParts : [filename])];
+  }
+
+  async function findDocumentFile(root, relativePath) {
+    const parts = pathParts(relativePath);
+    const insideParts = String(parts[0] || '').toLocaleLowerCase() === 'documents' ? parts.slice(1) : parts;
+    const filename = insideParts[insideParts.length - 1];
+    if (!filename) throw new Error('The document path is empty.');
+    const remembered = documentLayoutCache.get(root);
+    if (remembered) {
+      try { return await fileAt(root, documentCandidate(remembered, insideParts, filename)); }
+      catch (_) { documentLayoutCache.delete(root); }
+    }
+    for (const prefix of DOCUMENT_ROOT_CANDIDATES) {
+      for (const mode of ['tree', 'flat']) {
+        const layout = { prefix, mode };
+        try {
+          const file = await fileAt(root, documentCandidate(layout, insideParts, filename));
+          documentLayoutCache.set(root, layout);
+          return file;
+        } catch (_) {}
+      }
+    }
+    throw new Error(`“${filename}” was not found in this folder.`);
+  }
+
+  async function findBudgetFile(root, filename) {
+    const remembered = budgetLayoutCache.get(root);
+    if (remembered) {
+      try { return await fileAt(root, [...remembered, filename]); }
+      catch (_) { budgetLayoutCache.delete(root); }
+    }
+    for (const prefix of BUDGET_ROOT_CANDIDATES) {
+      try {
+        const file = await fileAt(root, [...prefix, filename]);
+        budgetLayoutCache.set(root, prefix);
+        return file;
+      } catch (_) {}
+    }
+    throw new Error(`“${filename}” was not found in this folder.`);
+  }
+
+  async function requirePermissionForValidation(handle, label, requestPermission) {
+    if (!handle) throw new Error(`Choose the ${label} location.`);
+    const state = await permission(handle, requestPermission);
+    if (state !== 'granted') throw new Error(`Reconnect the remembered ${label} location.`);
+    return handle;
+  }
+
+  async function validateLibraryHandle(handle, requestPermission = true) {
+    const root = await requirePermissionForValidation(handle, 'document library', requestPermission);
+    const sample = libraryRecords().find(record => record && record.path && record.fn);
+    if (!sample) throw new Error('The application document index is unavailable.');
+    try {
+      await findDocumentFile(root, sample.path);
+    } catch (_) {
+      throw new Error('No matching Project Tools document library was found. Select the release folder, Project Tools Content Library, Project Tools Library, or its documents folder.');
+    }
+    return root;
+  }
+
+  async function validateBudgetHandle(handle, requestPermission = true) {
+    const root = await requirePermissionForValidation(handle, 'price-list folder', requestPermission);
+    const filenames = budgetSourceFiles();
+    if (!filenames.length) throw new Error('The application price-list index is unavailable.');
+    try {
+      for (const filename of filenames) await findBudgetFile(root, filename);
+    } catch (_) {
+      throw new Error('The three expected price-list workbooks were not found. Select the release folder, Project Tools Library, Budget Data, or Source Price Lists.');
+    }
+    return root;
   }
 
   async function getLibraryFile(relativePath) {
@@ -206,22 +307,13 @@
     const parts = pathParts(relativePath);
     const filename = parts[parts.length - 1];
     try {
-      return await firstAvailable(root, [
-        parts,
-        ['documents', filename],
-        [filename],
-      ]);
+      return await findDocumentFile(root, relativePath);
     } catch (_) {
-      throw new Error(`“${filename || 'Document'}” was not found in the selected library. Choose the current Project Tools Library folder in Local files.`);
+      throw new Error(`“${filename || 'Document'}” was not found in the selected library. Open Local files and choose the release folder, Project Tools Content Library, Project Tools Library, or its documents folder.`);
     }
   }
 
   async function readBudgetWorkbook(filename) {
-    const candidates = [
-      [filename],
-      ['Budget Data', 'Source Price Lists', filename],
-      ['Project Tools Library', 'Budget Data', 'Source Price Lists', filename],
-    ];
     const roots = [];
     if (budgetHandle) roots.push({ handle: budgetHandle, label: 'price-list folder' });
     if (libraryHandle && libraryHandle !== budgetHandle) roots.push({ handle: libraryHandle, label: 'document library' });
@@ -232,11 +324,11 @@
     for (const entry of roots) {
       try {
         const root = await requirePermission(entry.handle, entry.label);
-        return await firstAvailable(root, candidates);
+        return await findBudgetFile(root, filename);
       } catch (_) {}
     }
     openSettings();
-    throw new Error(`“${filename}” was not found. Choose the folder containing the three price-list workbooks in Local files.`);
+    throw new Error(`“${filename}” was not found. In Local files, choose the release folder, Project Tools Library, Budget Data, or Source Price Lists.`);
   }
 
   function download(blob, filename) {
@@ -285,6 +377,8 @@
       id: kind === HANDLE_LIBRARY ? 'project-tools-library' : 'project-tools-price-lists',
       mode: 'read',
     });
+    if (kind === HANDLE_LIBRARY) await validateLibraryHandle(handle, true);
+    else await validateBudgetHandle(handle, true);
     await saveHandle(kind, handle);
     if (kind === HANDLE_LIBRARY) libraryHandle = handle;
     else budgetHandle = handle;
@@ -297,6 +391,12 @@
     if (!handle) return chooseLocation(kind);
     const state = await permission(handle, true);
     if (state !== 'granted') throw new Error('Folder access was not granted.');
+    try {
+      if (kind === HANDLE_LIBRARY) await validateLibraryHandle(handle, false);
+      else await validateBudgetHandle(handle, false);
+    } catch (_) {
+      return chooseLocation(kind);
+    }
     await refreshSettings();
     return handle;
   }
@@ -308,32 +408,46 @@
     await refreshSettings();
   }
 
-  function describeHandle(handle, state, fallback) {
+  function describeHandle(handle, state, fallback, validationError) {
     if (!handle) return { text: fallback, state: 'missing', action: 'Select folder' };
-    if (state === 'granted') return { text: `${handle.name} · connected`, state: 'connected', action: 'Connected' };
+    if (state === 'granted' && !validationError) return { text: `${handle.name} · connected and verified`, state: 'connected', action: 'Connected' };
+    if (state === 'granted') return { text: `${handle.name} · ${validationError}`, state: 'missing', action: 'Choose again' };
     return { text: `${handle.name} · remembered; reconnect required`, state: 'missing', action: 'Reconnect' };
   }
 
   async function refreshSettings() {
-    if (!settingsDialog) return;
+    if (!settingsDialog) return { libraryReady: false, budgetReady: false };
     const libraryState = await permission(libraryHandle, false);
     const budgetState = await permission(budgetHandle, false);
-    const library = describeHandle(libraryHandle, libraryState, 'No document library selected');
-    const budget = describeHandle(budgetHandle, budgetState, 'No price-list folder selected');
+    let libraryValidation = '';
+    let budgetValidation = '';
+    if (libraryState === 'granted') {
+      try { await validateLibraryHandle(libraryHandle, false); }
+      catch (_) { libraryValidation = 'library files not found at this level'; }
+    }
+    if (budgetState === 'granted') {
+      try { await validateBudgetHandle(budgetHandle, false); }
+      catch (_) { budgetValidation = 'price-list workbooks not found at this level'; }
+    }
+    const libraryReady = libraryState === 'granted' && !libraryValidation;
+    const budgetReady = budgetState === 'granted' && !budgetValidation;
+    const library = describeHandle(libraryHandle, libraryState, 'No document library selected', libraryValidation);
+    const budget = describeHandle(budgetHandle, budgetState, 'No price-list folder selected', budgetValidation);
     libraryStatus.textContent = library.text;
     libraryStatus.dataset.state = library.state;
     budgetStatus.textContent = budget.text;
     budgetStatus.dataset.state = budget.state;
     libraryConnect.textContent = library.action;
-    libraryConnect.disabled = libraryState === 'granted';
+    libraryConnect.disabled = libraryReady;
     budgetConnect.textContent = budget.action;
-    budgetConnect.disabled = budgetState === 'granted';
+    budgetConnect.disabled = budgetReady;
     if (settingsButton) {
-      settingsButton.dataset.state = libraryState === 'granted' && budgetState === 'granted' ? 'ready' : 'attention';
-      settingsButton.title = libraryState === 'granted' && budgetState === 'granted'
+      settingsButton.dataset.state = libraryReady && budgetReady ? 'ready' : 'attention';
+      settingsButton.title = libraryReady && budgetReady
         ? 'Local folders connected'
         : 'Local folders need attention';
     }
+    return { libraryReady, budgetReady };
   }
 
   function openSettings() {
@@ -437,10 +551,8 @@
       libraryHandle = null;
       budgetHandle = null;
     }
-    await refreshSettings();
-    const libraryState = await permission(libraryHandle, false);
-    const budgetState = await permission(budgetHandle, false);
-    if (libraryState !== 'granted' || budgetState !== 'granted') openSettings();
+    const readiness = await refreshSettings();
+    if (!readiness.libraryReady || !readiness.budgetReady) openSettings();
   }
 
   function unlockApplication() {

@@ -7,8 +7,8 @@
 <meta name="description" content="Browser-only document search, BOM, budgeting, Apple BOM, and DALI schedule workspace.">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="assets/local-mode.css">
-<script src="assets/local-mode.js"></script>
+<link rel="stylesheet" href="assets/local-mode.css?v=20260917-2">
+<script src="assets/local-mode.js?v=20260917-2"></script>
 <title>Project Tools</title>
 <script>
 try {
@@ -1378,6 +1378,7 @@ dialog::backdrop { background: rgba(3, 12, 18, .62); backdrop-filter: blur(3px);
 .apple-bom-export { display:flex; flex-wrap:wrap; gap:14px 24px; align-items:center; }
 .apple-bom-export label { display:flex; grid-template-columns:auto 1fr; align-items:center; gap:8px; color:var(--text-soft); text-transform:none; }
 .apple-bom-export-actions { display:flex; gap:10px; margin-left:auto; align-items:center; }
+.export-document-types.apple-bom-document-types { flex-basis:100%; margin:0; }
 .apple-bom-status { flex-basis:100%; margin:0; color:var(--text-faint); font-size:12px; }
 .apple-bom-status[data-state="error"] { color:var(--danger); }
 .apple-bom-status[data-state="ready"] { color:var(--success); }
@@ -1437,15 +1438,37 @@ dialog::backdrop { background: rgba(3, 12, 18, .62); backdrop-filter: blur(3px);
 .dali-source-table td { color:var(--text-soft); font-size:11px; line-height:1.35; }
 .dali-preview-note { margin:8px 12px 10px; color:var(--text-faint); font-size:10px; }
 .dali-combine-row { display:flex; justify-content:flex-end; margin-top:14px; }
+.dali-review-actions { display:flex; align-items:center; justify-content:flex-end; gap:12px; flex-wrap:wrap; }
 .dali-review-summary { display:flex; flex-wrap:wrap; gap:7px 18px; color:var(--text-faint); font-size:12px; }
 .dali-review-summary strong { color:var(--success); }
+.dali-loop-sections { display:grid; gap:16px; }
+.dali-loop-section { overflow:hidden; border:1px solid var(--line); border-radius:11px; background:var(--surface); }
+.dali-loop-section.over-limit { border-color:#dc5d54; }
+.dali-loop-section-head { min-height:52px; padding:9px 12px; display:flex; align-items:center; justify-content:space-between; gap:12px; color:#fff; background:#111827; }
+.dali-loop-section-head > div { display:flex; align-items:center; gap:10px; min-width:0; }
+.dali-loop-section-head > div > span { color:#b8c3d4; font-size:10px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }
+.dali-loop-section-head label { margin:0; }
+.dali-loop-editor { width:92px; min-height:34px; padding:5px 8px; border:1px solid #5f6d80; border-radius:7px; color:#fff; background:#202c3d; font:800 14px/1.2 inherit; text-transform:uppercase; }
+.dali-loop-editor:focus { border-color:#54b8dc; outline:2px solid rgba(84,184,220,.22); }
+.dali-loop-section-head strong { color:#d9e2ee; font-size:12px; font-weight:650; }
+.dali-loop-section-head .tool-button { min-height:34px; padding:6px 10px; border-color:#55647a; color:#fff; background:#273448; }
+.dali-loop-section-head .tool-button:hover { background:#334258; }
 .dali-review-wrap { overflow:auto; border:1px solid var(--line); border-radius:10px; }
-.dali-review-table { width:100%; min-width:1120px; border-collapse:collapse; background:var(--surface); }
+.dali-loop-section .dali-review-wrap { border:0; border-radius:0; }
+.dali-review-table { width:100%; min-width:1420px; border-collapse:collapse; background:var(--surface); }
 .dali-review-table th { padding:9px 8px; color:var(--text-faint); background:var(--surface-soft); font-size:10px; letter-spacing:.06em; text-align:left; text-transform:uppercase; }
 .dali-review-table td { padding:7px; border-top:1px solid var(--line); }
 .dali-review-table input:not([type="checkbox"]), .dali-review-table select { width:100%; min-height:35px; padding:6px 8px; border:1px solid var(--line-strong); border-radius:7px; color:var(--text); background:var(--surface); }
-.dali-review-table td:nth-child(2), .dali-review-table td:nth-child(3) { width:88px; }
-.dali-review-table td:nth-child(7) { width:170px; }
+.dali-review-table td:nth-child(1) { width:46px; text-align:center; }
+.dali-review-table td:nth-child(2), .dali-review-table td:nth-child(3) { width:82px; }
+.dali-review-table td:nth-child(4) { width:68px; text-align:center; }
+.dali-review-table td:nth-child(8) { width:220px; }
+.dali-review-table td:nth-child(9) { width:210px; }
+.dali-review-table td:nth-child(10) { width:100px; }
+.dali-review-table td:nth-child(11) { width:42px; }
+.dali-review-table tr[data-excluded="true"] { opacity:.54; }
+.dali-row-loop { font-weight:800; text-transform:uppercase; }
+.dali-group-number { color:var(--text-soft); font-weight:750; }
 .dali-quantity-control { display:flex; align-items:center; gap:6px; min-width:156px; }
 .dali-quantity-control > input { min-width:66px; }
 .dali-driver-button { width:36px; height:35px; flex:none; padding:0; border:1px solid var(--line-strong); border-radius:7px; color:#64748b; background:var(--surface); font:700 14px/1 Arial,sans-serif; cursor:pointer; }
@@ -1453,12 +1476,16 @@ dialog::backdrop { background: rgba(3, 12, 18, .62); backdrop-filter: blur(3px);
 .dali-driver-button.active { color:#a16207; border-color:#f0c66b; background:#fff8e7; }
 .dali-driver-select { min-width:124px; }
 .dali-driver-select[hidden] { display:none; }
+.dali-address-result { min-width:42px; color:var(--accent-strong); font-size:12px; font-weight:800; text-align:right; white-space:nowrap; }
 .dali-match { display:inline-block; padding:4px 7px; border-radius:999px; font-size:10px; font-weight:800; white-space:nowrap; }
 .dali-match.matched { color:#087a55; background:#ddf6ec; }
 .dali-match.ambiguous { color:#965f00; background:#fff0cc; }
 .dali-match.unmatched { color:#b42318; background:#fee4e2; }
 .dali-delete-row { width:31px; height:31px; border:0; border-radius:7px; color:var(--danger); background:transparent; font-size:20px; cursor:pointer; }
 .dali-delete-row:hover { background:color-mix(in srgb,var(--danger) 9%,var(--surface)); }
+.dali-review-table tfoot td { min-height:40px; color:#123d2b; background:#d8f3df; font-size:11px; font-weight:750; text-align:center; }
+.dali-review-table tfoot td:first-child { text-align:left; }
+.dali-review-table tfoot td.over-limit { color:#9f2018; background:#fee4e2; }
 .dali-metadata { display:grid; grid-template-columns:2fr 1fr 1fr 1fr; gap:10px; margin-top:14px; }
 .dali-metadata label { display:grid; gap:5px; color:var(--text-faint); font-size:11px; font-weight:750; text-transform:uppercase; }
 .dali-metadata input { min-height:38px; padding:7px 9px; border:1px solid var(--line-strong); border-radius:8px; color:var(--text); background:var(--surface); font:inherit; text-transform:none; }
@@ -1757,6 +1784,8 @@ dialog::backdrop { background: rgba(3, 12, 18, .62); backdrop-filter: blur(3px);
     </div>
     <div class="apple-bom-preset-actions">
       <button class="tool-button primary" id="apple-bom-load-preset" type="button">Load preset</button>
+      <button class="tool-button" id="apple-bom-import-quote" type="button">Import CDTL Quote</button>
+      <input id="apple-bom-quote-file" type="file" accept=".pdf,application/pdf" hidden>
       <button class="tool-button" id="apple-bom-add-section" type="button">+ Add section</button>
       <button class="tool-button" id="apple-bom-save-preset" type="button">Save current as preset</button>
       <button class="tool-button" id="apple-bom-delete-preset" type="button" hidden>Delete preset</button>
@@ -1769,6 +1798,15 @@ dialog::backdrop { background: rgba(3, 12, 18, .62); backdrop-filter: blur(3px);
     <label><input id="apple-bom-export-csv" type="checkbox"> CSV</label>
     <label><input id="apple-bom-export-documents" type="checkbox"> Include matched product documents</label>
     <div class="apple-bom-export-actions"><button class="tool-button primary" id="apple-bom-export" type="button">Export Apple BOM</button></div>
+    <fieldset class="export-document-types apple-bom-document-types" id="apple-bom-document-types" hidden>
+      <legend>Product document types</legend>
+      <div class="export-type-actions">
+        <button class="tool-button" id="apple-bom-doc-recommended" type="button">Recommended</button>
+        <button class="tool-button" id="apple-bom-doc-all" type="button">Select all</button>
+        <button class="tool-button" id="apple-bom-doc-none" type="button">Select none</button>
+      </div>
+      <div class="export-type-options" id="apple-bom-document-options"></div>
+    </fieldset>
     <p class="apple-bom-status" id="apple-bom-status">Choose one or more output formats. Duplicate product documents are removed automatically.</p>
   </section>
 </main>
@@ -1807,13 +1845,11 @@ dialog::backdrop { background: rgba(3, 12, 18, .62); backdrop-filter: blur(3px);
   </section>
 
   <section class="dali-card" id="dali-review-panel" hidden>
-    <div class="dali-card-head"><div><h2>Review combined schedule</h2><p>Edit any cell before exporting. Unmatched and ambiguous rows are highlighted for review.</p></div><div class="dali-review-summary" id="dali-review-summary"></div></div>
-    <div class="dali-review-wrap">
-      <table class="dali-review-table">
-        <thead><tr><th>Use</th><th>Loop</th><th>Zone</th><th>Area</th><th>Location</th><th>Fixture</th><th>Qty / address</th><th>Status</th><th></th></tr></thead>
-        <tbody id="dali-review-body"></tbody>
-      </table>
+    <div class="dali-card-head">
+      <div><h2>Review combined schedule</h2><p>The on-screen sections match the Excel export. Edit a loop or zone, then refresh to rematch and reorganize the schedule.</p></div>
+      <div class="dali-review-actions"><button class="tool-button" id="dali-refresh" type="button">Refresh schedule</button><div class="dali-review-summary" id="dali-review-summary"></div></div>
     </div>
+    <div class="dali-loop-sections" id="dali-review-body"></div>
     <div class="dali-metadata">
       <label>Project<input id="dali-project" type="text" placeholder="Apple Store R868"></label>
       <label>Created by<input id="dali-creator" type="text" placeholder="Name"></label>
@@ -4876,6 +4912,7 @@ String.fromCodePoint||function(){var t=String.fromCharCode,e=Math.floor,n=functi
         documents: result.documents.map(item => ({
           path: item.record.path,
           documentType: safeFilePart(item.record.dt, 'Other Documents'),
+          displayDocumentType: String(item.record.dt || 'Other Documents'),
           targetName: exportDocumentTarget(item.record),
           sha: item.record.sha || item.record.path
         })),
@@ -5013,7 +5050,7 @@ String.fromCodePoint||function(){var t=String.fromCharCode,e=Math.floor,n=functi
   });
 })();
 </script>
-<script type="module" src="assets/apple-dali.mjs"></script>
-<script type="module" src="assets/apple-bom.mjs"></script>
+<script type="module" src="assets/apple-dali.mjs?v=20260917-2"></script>
+<script type="module" src="assets/apple-bom.mjs?v=20260917-2"></script>
 </body>
 </html>

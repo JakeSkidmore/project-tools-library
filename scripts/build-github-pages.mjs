@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const outputRoot = resolve(projectRoot, 'docs');
+const staticVersion = '20260917-2';
 
 function replaceRequired(source, search, replacement, label) {
   if (!source.includes(search)) throw new Error(`Unable to build GitHub Pages: ${label} was not found.`);
@@ -15,7 +16,7 @@ let html = await readFile(resolve(projectRoot, 'private/tool.html'), 'utf8');
 html = replaceRequired(
   html,
   '<meta name="description" content="Private document search and BOM budgeting workspace.">',
-  '<meta name="description" content="Browser-only document search, BOM, budgeting, Apple BOM, and DALI schedule workspace.">\n<link rel="manifest" href="manifest.webmanifest">\n<link rel="icon" href="favicon.svg" type="image/svg+xml">\n<link rel="stylesheet" href="assets/local-mode.css">\n<script src="assets/local-mode.js"></script>',
+  `<meta name="description" content="Browser-only document search, BOM, budgeting, Apple BOM, and DALI schedule workspace.">\n<link rel="manifest" href="manifest.webmanifest">\n<link rel="icon" href="favicon.svg" type="image/svg+xml">\n<link rel="stylesheet" href="assets/local-mode.css?v=${staticVersion}">\n<script src="assets/local-mode.js?v=${staticVersion}"></script>`,
   'page metadata',
 );
 
@@ -55,6 +56,8 @@ html = replaceRequired(
 );
 
 html = html.replaceAll('src="/assets/', 'src="assets/');
+html = html.replace('src="assets/apple-dali.mjs"', `src="assets/apple-dali.mjs?v=${staticVersion}"`);
+html = html.replace('src="assets/apple-bom.mjs"', `src="assets/apple-bom.mjs?v=${staticVersion}"`);
 
 let appleBom = await readFile(resolve(projectRoot, 'public/assets/apple-bom.mjs'), 'utf8');
 appleBom = replaceRequired(
